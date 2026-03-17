@@ -1,0 +1,49 @@
+{
+  "scripts": {
+    "dev:local": "cross-env NODE_ENV=development ts-node src/server.ts --env-file=.env.local",
+    "dev:dev": "cross-env NODE_ENV=development ts-node src/server.ts --env-file=.env.development",
+    "dev:prod": "cross-env NODE_ENV=production ts-node src/server.ts --env-file=.env.production",
+    "dev:vercel": "cross-env NODE_ENV=development ts-node src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc",
+    "env:switch-dev": "node -e \"require('fs').copyFileSync('.env.development', '.env'); console.log('✅ Switched to DEVELOPMENT environment');\"",
+    "env:switch-prod": "node -e \"require('fs').copyFileSync('.env.production', '.env'); console.log('✅ Switched to PRODUCTION environment');\"",
+    "env:status": "node -e \"const fs = require('fs'); try { const env = fs.readFileSync('.env', 'utf8'); const isDev = env.includes('NODE_ENV=development'); console.log('🔧 Current environment:', isDev ? 'DEVELOPMENT' : 'PRODUCTION'); } catch(e) { console.log('❌ No .env file found'); }\""
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.52.0",
+    "@types/multer": "^2.0.0",
+    "@types/nodemailer": "^7.0.3",
+    "@types/pg": "^8.15.5",
+    "@types/ws": "^8.18.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.0.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "jwks-rsa": "^3.2.0",
+    "lib0": "^0.2.114",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.10",
+    "openai": "^5.12.2",
+    "pg": "^8.16.3",
+    "replicate": "^1.0.1",
+    "stripe": "^18.5.0",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.3",
+    "y-websocket": "^3.0.0",
+    "yjs": "^13.6.27",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.0.15",
+    "@types/uuid": "^10.0.0",
+    "cross-env": "^10.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}

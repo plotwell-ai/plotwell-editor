@@ -1,0 +1,76 @@
+# === Node.js === 
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+.env
+.venv
+env/
+venv/
+
+# === macOS ===
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# === Windows ===
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# === Linux ===
+*~
+
+# === JetBrains IDEs ===
+.idea/
+*.iml
+
+# === VS Code ===
+.vscode/
+
+# === Logs and local output ===
+*.log
+logs/
+*.out
+*.pid
+
+# === Test coverage ===
+.coverage
+coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# === Build / Dist folders ===
+dist/
+build/
+*.egg-info/
+
+# === dotenv files ===
+.env
+.env.local
+.env.development
+.env.production
+!.env.example
+
+# === Git ===
+*.orig
+
+# === Misc ===
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# === Dependency files ===
+poetry.lock
+Pipfile.lock
