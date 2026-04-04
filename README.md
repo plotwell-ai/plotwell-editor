@@ -223,7 +223,7 @@ Please open an issue before starting significant work so we can align on directi
 
 ## Attribution
 
-Free to use under MIT. Apps embedding `@plotwell/editor` must display the `"Powered by plotwell"` attribution link (enabled by default via the `attribution` option).
+Free to use under MIT. Apps embedding `@plotwell/editor` must display the `"Powered by plotwell.co"` attribution link (enabled by default via the `attribution` option).
 
 To remove attribution for commercial or white-label use, contact [info@plotwell.co](mailto:info@plotwell.co) for a commercial license.
 
