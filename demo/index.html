@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>plotwell editor — Open Source Screenplay Editor</title>
+  <meta name="description" content="Free, open-source screenplay editor built on ProseMirror. Industry-standard formatting, real-time pagination, scene numbers. Import Fountain & Final Draft. Export to PDF." />
+  <meta name="keywords" content="screenplay editor, screenwriting software, fountain editor, final draft alternative, prosemirror, open source, free screenplay editor, script writing, screenwriting tool, screenplay formatter" />
+  <link rel="canonical" href="https://editor.plotwell.co" />
+  <meta name="robots" content="index, follow" />
+  <meta name="author" content="plotwell" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="plotwell editor — Free Open Source Screenplay Editor" />
+  <meta property="og:description" content="Free, open-source screenplay editor with industry-standard Hollywood formatting, real-time pagination, scene numbers. Import Fountain & Final Draft, export to PDF. Built on ProseMirror." />
+  <meta property="og:url" content="https://editor.plotwell.co" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="plotwell" />
+  <meta property="og:locale" content="en_US" />
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="plotwell editor — Free Open Source Screenplay Editor" />
+  <meta name="twitter:description" content="Free, open-source screenplay editor with industry-standard formatting. Import Fountain & Final Draft, export to PDF." />
+
+  <!-- Structured Data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "plotwell editor",
+    "applicationCategory": "Multimedia",
+    "applicationSubCategory": "Screenwriting",
+    "operatingSystem": "Web",
+    "url": "https://editor.plotwell.co",
+    "description": "Free, open-source screenplay editor with industry-standard Hollywood formatting, real-time pagination, and scene numbers. Import Fountain and Final Draft files, export to PDF. Built on ProseMirror.",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Organization", "name": "plotwell", "url": "https://plotwell.co" },
+    "license": "https://opensource.org/licenses/MIT",
+    "codeRepository": "https://github.com/plotwell-ai/plotwell-editor",
+    "programmingLanguage": "TypeScript",
+    "featureList": "Industry-standard screenplay formatting, Real-time pagination, Scene numbers, Fountain import, Final Draft import, PDF export, Dark mode, Collaborative editing support"
+  }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #e8e8e8;
+      font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    /* --- Toolbar --- */
+    #toolbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      background: #111827;
+      color: #fff;
+      padding: 0 16px;
+      height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      z-index: 100;
+      font-size: 12px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      text-decoration: none;
+      color: #fff;
+      margin-right: 6px;
+    }
+    .brand-icon {
+      width: 24px; height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .brand-icon svg { width: 24px; height: 24px; }
+    .brand-name {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      color: #f0f0f0;
+    }
+
+    .sep {
+      width: 1px;
+      height: 18px;
+      background: #333;
+      margin: 0 4px;
+    }
+
+    .toolbar-group { display: flex; gap: 1px; }
+
+    #toolbar button {
+      background: transparent;
+      border: 1px solid transparent;
+      color: #9ca3af;
+      padding: 4px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 11px;
+      font-family: inherit;
+      font-weight: 500;
+      transition: all 0.12s;
+    }
+    #toolbar button:hover {
+      background: #1f2937;
+      color: #e5e7eb;
+    }
+    #toolbar button.active {
+      background: #d97706;
+      color: #fff;
+      border-color: #d97706;
+    }
+
+    /* Format buttons */
+    .toolbar-group button {
+      width: 28px;
+      padding: 4px 0;
+      text-align: center;
+      font-size: 12px;
+    }
+
+    #stats-label {
+      color: #6b7280;
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    #node-type-label {
+      margin-left: auto;
+      color: #d97706;
+      font-size: 10px;
+      font-weight: 600;
+      font-family: "Courier Prime", monospace;
+      letter-spacing: 0.05em;
+    }
+
+    #github-link {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 4px 8px;
+      border-radius: 5px;
+      transition: all 0.12s;
+      white-space: nowrap;
+    }
+    #github-link:hover { color: #e5e7eb; background: #1f2937; }
+    .github-label { font-family: inherit; }
+
+    .hidden-input { display: none; }
+
+    /* --- Modal --- */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(2px);
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      width: 560px;
+      max-width: 90vw;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    }
+    .modal h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #111827;
+    }
+    .modal textarea {
+      width: 100%;
+      height: 280px;
+      font-family: "Courier Prime", monospace;
+      font-size: 12px;
+      padding: 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .modal textarea:focus { border-color: #d97706; box-shadow: 0 0 0 3px rgba(217,119,6,0.1); }
+    .modal .actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .modal button {
+      padding: 8px 20px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      transition: all 0.12s;
+    }
+    .btn-primary { background: #d97706; color: #fff; }
+    .btn-primary:hover { background: #b45309; }
+    .btn-secondary { background: #f3f4f6; color: #374151; }
+    .btn-secondary:hover { background: #e5e7eb; }
+
+    .modal input[type="text"] {
+      width: 100%;
+      padding: 8px 12px;
+      font-family: inherit;
+      font-size: 13px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .modal input[type="text"]:focus { border-color: #d97706; box-shadow: 0 0 0 3px rgba(217,119,6,0.1); }
+    .modal label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #374151;
+      display: block;
+      margin-bottom: 4px;
+    }
+    .form-row { display: flex; flex-direction: column; gap: 2px; }
+
+    #editor-wrap { padding-top: 42px; }
+
+    /* --- Mobile toolbar --- */
+    @media (max-width: 768px) {
+      #toolbar {
+        overflow-x: auto;
+        gap: 4px;
+        padding: 0 8px;
+        -webkit-overflow-scrolling: touch;
+      }
+      #toolbar button { padding: 4px 8px; font-size: 10px; white-space: nowrap; }
+      .toolbar-group button { width: 26px; font-size: 11px; }
+      #stats-label { display: none; }
+      #node-type-label { display: none; }
+      .brand-name { display: none; }
+      .github-label { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<div id="toolbar">
+  <a href="https://plotwell.co" target="_blank" rel="noopener" class="brand">
+    <span class="brand-icon">
+      <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="pw-logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#f59e0b"/>
+            <stop offset="100%" stop-color="#d97706"/>
+          </linearGradient>
+        </defs>
+        <circle cx="50" cy="50" r="42" fill="url(#pw-logo-grad)"/>
+        <g fill="white">
+          <rect x="25" y="20" width="50" height="6" rx="3"/>
+          <rect x="30" y="30" width="40" height="6" rx="3"/>
+          <rect x="20" y="40" width="60" height="6" rx="3"/>
+          <rect x="35" y="50" width="30" height="6" rx="3"/>
+          <rect x="15" y="60" width="70" height="6" rx="3"/>
+          <rect x="40" y="70" width="20" height="6" rx="3"/>
+          <circle cx="78" cy="25" r="2"/>
+          <circle cx="12" cy="75" r="2"/>
+          <circle cx="65" cy="82" r="1.5"/>
+        </g>
+      </svg>
+    </span>
+    <span class="brand-name">plotwell</span>
+  </a>
+
+  <div class="sep"></div>
+
+  <div class="toolbar-group">
+    <button id="btn-bold" title="Bold (Cmd+B)"><strong>B</strong></button>
+    <button id="btn-italic" title="Italic (Cmd+I)"><em>I</em></button>
+    <button id="btn-underline" title="Underline (Cmd+U)"><u>U</u></button>
+  </div>
+
+  <div class="sep"></div>
+
+  <button id="btn-open-file">Open</button>
+  <button id="btn-paste-fountain">Paste</button>
+
+  <div class="sep"></div>
+
+  <button id="btn-export-fountain">.fountain</button>
+  <button id="btn-export-fdx">.fdx</button>
+  <button id="btn-export-pdf">PDF</button>
+
+  <div class="sep"></div>
+
+  <button id="btn-reading" title="Toggle reading mode">Read</button>
+  <button id="btn-dark" title="Toggle dark mode">Dark</button>
+
+  <div class="sep"></div>
+
+  <a href="https://github.com/plotwell-ai/plotwell-editor" target="_blank" rel="noopener" id="github-link" title="Open source on GitHub">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    <span class="github-label">Open Source</span>
+  </a>
+
+  <span id="stats-label"></span>
+  <span id="node-type-label"></span>
+</div>
+
+<input type="file" id="file-input" class="hidden-input" accept=".fountain,.fdx,.txt">
+
+<div class="modal-overlay" id="import-modal">
+  <div class="modal">
+    <h3>Import Fountain</h3>
+    <textarea id="fountain-text" placeholder="Paste your .fountain screenplay here..."></textarea>
+    <div class="actions">
+      <button class="btn-secondary" id="btn-import-cancel">Cancel</button>
+      <button class="btn-primary" id="btn-import-confirm">Import</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="cover-modal">
+  <div class="modal">
+    <h3>Cover Page & Export PDF</h3>
+    <div class="form-row">
+      <label>Title</label>
+      <input type="text" id="cover-title" placeholder="UNTITLED SCREENPLAY" />
+    </div>
+    <div class="form-row">
+      <label>Written by</label>
+      <input type="text" id="cover-author" placeholder="Author Name" />
+    </div>
+    <div class="form-row">
+      <label>Based on</label>
+      <input type="text" id="cover-based-on" placeholder="(optional)" />
+    </div>
+    <div class="form-row">
+      <label>Draft date</label>
+      <input type="text" id="cover-draft" />
+    </div>
+    <div class="form-row">
+      <label>Contact</label>
+      <input type="text" id="cover-contact" placeholder="email@example.com" />
+    </div>
+    <div class="form-row">
+      <label>Copyright</label>
+      <input type="text" id="cover-copyright" placeholder="(optional)" />
+    </div>
+    <div class="actions">
+      <button class="btn-secondary" id="btn-cover-cancel">Cancel</button>
+      <button class="btn-primary" id="btn-cover-export">Export PDF</button>
+    </div>
+  </div>
+</div>
+
+<noscript>
+  <div style="max-width:700px;margin:60px auto;padding:24px;font-family:sans-serif;text-align:center;">
+    <h1>plotwell editor — Free Open Source Screenplay Editor</h1>
+    <p>A free, open-source screenplay editor with industry-standard Hollywood formatting, real-time pagination, and scene numbers. Import Fountain and Final Draft files, export to PDF.</p>
+    <p>Built on ProseMirror. MIT licensed.</p>
+    <p><a href="https://github.com/plotwell-ai/plotwell-editor">View on GitHub</a> | <a href="https://plotwell.co">plotwell.co</a></p>
+    <p>Please enable JavaScript to use the editor.</p>
+  </div>
+</noscript>
+
+<div id="editor-wrap">
+  <div class="plotwell-editor-wrap">
+    <div id="editor"></div>
+  </div>
+</div>
+
+<script type="module">
+  import "../src/styles.css";
+  import { PlotwellEditor, schema } from "../src/index.ts";
+  import { toggleMark } from "prosemirror-commands";
+
+  const sampleFountain = `FADE IN:
+
+INT. COFFEE SHOP - BUENOS AIRES - DAY
+
+A crowded cafe on Avenida Corrientes. Ceiling fans spin lazily overhead. Morning light streams through tall windows, casting warm rectangles across the checkered floor.
+
+LUCIA (30s, sharp eyes, leather jacket draped over her chair) sits alone at a corner table. A cold espresso sits untouched in front of her. She watches the door.
+
+The bell above the entrance rings. MARIO (40s, rumpled linen suit, loosened tie) pushes through. He scans the room, spots her, and hesitates for a beat before crossing.
+
+MARIO
+You said noon.
+
+LUCIA
+I said "be on time." There's a difference.
+
+He drops into the chair across from her. Runs a hand through his hair.
+
+MARIO
+The producers called again. Twice.
+
+LUCIA
+And?
+
+MARIO
+(leaning forward)
+They want pages, Lucia. Sixty at least. By Friday.
+
+LUCIA
+(a beat, then smiling)
+I burned the script.
+
+MARIO
+You what?
+
+LUCIA
+Every page. All of it. Gone.
+
+A long silence. Mario stares at her. She finally lifts her espresso and takes a slow sip. Perfectly calm.
+
+MARIO
+Tell me you're joking.
+
+LUCIA
+I'm rewriting it. From scratch. The whole thing. The story was wrong, Mario. It was always wrong, and we both know it.
+
+Mario leans back. Exhales.
+
+MARIO
+We have a deal. We have a schedule.
+
+LUCIA
+We have a chance to make something real. Or we can turn in sixty pages of something safe that nobody will remember.
+
+She reaches into her bag and pulls out a single handwritten page. Slides it across the table.
+
+LUCIA (CONT'D)
+Read it.
+
+Mario picks up the page. His expression shifts as he reads -- skepticism giving way to something else. He looks up.
+
+MARIO
+(quietly)
+Where did this come from?
+
+LUCIA
+Last night. Three in the morning. It just... arrived.
+
+CUT TO:
+
+EXT. ROOFTOP - NIGHT
+
+City lights spread to the horizon. Wind whips through Lucia's hair as she stands at the edge of a rooftop terrace, arms spread wide. Below her, handwritten script pages drift down into the darkness like snow.
+
+She turns back. A small table holds a typewriter, a fresh sheet already loaded. A glass of red wine. The city hums beneath her.
+
+She sits. Cracks her knuckles. Begins to type. We hold on her face -- determined, alive, free.
+
+LUCIA (V.O.)
+Every good story starts the same way. You let go of the last one.
+
+The typewriter keys clatter. We pull back slowly, revealing the full skyline of Buenos Aires stretching out behind her, glittering.
+
+FADE OUT.`;
+
+  const editor = new PlotwellEditor({
+    container: document.getElementById("editor"),
+    content: sampleFountain,
+    attribution: true,
+    bubbleMenu: true,
+    typeBadge: true,
+  });
+
+  // --- Node type label ---
+  const labels = {
+    sceneHeading:   "SCENE HEADING",
+    action:         "ACTION",
+    character:      "CHARACTER",
+    dialogue:       "DIALOGUE",
+    parenthetical:  "PARENTHETICAL",
+    transition:     "TRANSITION",
+  };
+
+  function updateLabel() {
+    const sel = editor.view.state.selection;
+    const type = sel.$from.parent.type.name;
+    document.getElementById("node-type-label").textContent = labels[type] || type;
+  }
+
+  editor.view.dom.addEventListener("keyup", updateLabel);
+  editor.view.dom.addEventListener("mouseup", updateLabel);
+  updateLabel();
+
+  // --- Bold / Italic / Underline ---
+  function runMark(markName) {
+    toggleMark(schema.marks[markName])(editor.view.state, editor.view.dispatch);
+    editor.view.focus();
+  }
+
+  document.getElementById("btn-bold").onclick = () => runMark("bold");
+  document.getElementById("btn-italic").onclick = () => runMark("italic");
+  document.getElementById("btn-underline").onclick = () => runMark("underline");
+
+  // --- File import ---
+  const fileInput = document.getElementById("file-input");
+
+  document.getElementById("btn-open-file").onclick = () => fileInput.click();
+
+  fileInput.addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const ext = (file.name.split(".").pop() || "").toLowerCase();
+      if (ext === "fdx") editor.importFDX(reader.result);
+      else editor.importFountain(reader.result);
+      editor.view.focus();
+    };
+    reader.readAsText(file);
+    fileInput.value = "";
+  });
+
+  // --- Paste fountain ---
+  document.getElementById("btn-paste-fountain").onclick = () => {
+    document.getElementById("import-modal").classList.add("open");
+    document.getElementById("fountain-text").value = "";
+    setTimeout(() => document.getElementById("fountain-text").focus(), 50);
+  };
+
+  document.getElementById("btn-import-confirm").onclick = () => {
+    const text = document.getElementById("fountain-text").value;
+    if (text.trim()) editor.importFountain(text);
+    document.getElementById("import-modal").classList.remove("open");
+    editor.view.focus();
+  };
+
+  document.getElementById("btn-import-cancel").onclick = () => {
+    document.getElementById("import-modal").classList.remove("open");
+    editor.view.focus();
+  };
+
+  // --- Exports ---
+  // --- PDF export with cover page modal ---
+  document.getElementById("btn-export-pdf").onclick = () => {
+    document.getElementById("cover-draft").value = "Draft - " + new Date().toLocaleDateString();
+    document.getElementById("cover-modal").classList.add("open");
+    document.getElementById("cover-title").focus();
+  };
+
+  document.getElementById("btn-cover-export").onclick = () => {
+    const title = document.getElementById("cover-title").value.trim();
+    const author = document.getElementById("cover-author").value.trim();
+    const basedOn = document.getElementById("cover-based-on").value.trim();
+    const draftDate = document.getElementById("cover-draft").value.trim();
+    const contactInfo = document.getElementById("cover-contact").value.trim();
+    const copyright = document.getElementById("cover-copyright").value.trim();
+
+    const hasCover = title || author;
+    editor.toPDF({
+      title: title || "Screenplay",
+      coverPage: hasCover ? { title, author, basedOn, draftDate, contactInfo, copyright } : undefined,
+    });
+    document.getElementById("cover-modal").classList.remove("open");
+  };
+
+  document.getElementById("btn-cover-cancel").onclick = () => {
+    document.getElementById("cover-modal").classList.remove("open");
+  };
+
+  document.getElementById("btn-export-fountain").onclick = () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([editor.toFountain()], { type: "text/plain" }));
+    a.download = "screenplay.fountain";
+    a.click();
+  };
+
+  document.getElementById("btn-export-fdx").onclick = () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([editor.toFDX()], { type: "application/xml" }));
+    a.download = "screenplay.fdx";
+    a.click();
+  };
+
+  // --- Reading mode ---
+  const formatBtns = [document.getElementById("btn-bold"), document.getElementById("btn-italic"), document.getElementById("btn-underline")];
+
+  document.getElementById("btn-reading").onclick = () => {
+    editor.setReadingMode(!editor.readingMode);
+    document.getElementById("btn-reading").classList.toggle("active", editor.readingMode);
+    // Disable formatting buttons in reading mode
+    formatBtns.forEach(btn => {
+      btn.disabled = editor.readingMode;
+      btn.style.opacity = editor.readingMode ? "0.3" : "";
+      btn.style.pointerEvents = editor.readingMode ? "none" : "";
+    });
+  };
+
+  // --- Dark mode ---
+  document.getElementById("btn-dark").onclick = () => {
+    const wrap = document.querySelector(".plotwell-editor-wrap");
+    const isDark = wrap.classList.contains("pw-dark");
+    editor.setDarkMode(!isDark);
+    document.getElementById("btn-dark").classList.toggle("active", !isDark);
+  };
+
+  // --- Writing stats ---
+  function updateStats() {
+    const s = editor.getStats();
+    document.getElementById("stats-label").textContent =
+      `${s.sceneCount} scenes \u00B7 ${s.pageCount} pg \u00B7 ${s.wordCount} words \u00B7 ${s.dialoguePercentage}% dialogue`;
+  }
+
+  editor.view.dom.addEventListener("keyup", updateStats);
+  setTimeout(updateStats, 500);
+
+  // --- Escape key ---
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      document.getElementById("import-modal").classList.remove("open");
+      document.getElementById("cover-modal").classList.remove("open");
+      if (editor.readingMode) {
+        editor.setReadingMode(false);
+        document.getElementById("btn-reading").classList.remove("active");
+        formatBtns.forEach(btn => { btn.disabled = false; btn.style.opacity = ""; btn.style.pointerEvents = ""; });
+      }
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,590 @@
+/* plotwell-editor — Industry Standard Screenplay Format
+ *
+ * Based on WGA / Hollywood standard:
+ * Page:       8.5" x 11" US Letter
+ * Font:       12pt Courier Prime (monospace, 10 chars/inch)
+ * Left margin:  1.5" from page edge
+ * Right margin: 1.0" from page edge
+ * Top margin:   1.0"
+ * Bottom margin:1.0"
+ *
+ * All pixel values at 96dpi (1" = 96px)
+ */
+
+:root {
+  /* Page */
+  --pw-page-w: 816px;       /* 8.5" x 96 */
+  --pw-page-h: 1056px;      /* 11"  x 96 */
+
+  /* Margins from page edge */
+  --pw-margin-top: 96px;    /* 1" */
+  --pw-margin-bottom: 96px; /* 1" */
+  --pw-margin-left: 144px;  /* 1.5" */
+  --pw-margin-right: 96px;  /* 1" */
+
+  /* Content width: 8.5 - 1.5 - 1.0 = 6.0" = 576px */
+  --pw-content-w: 576px;
+
+  /* Typography */
+  --pw-font: "Courier Prime", "Courier New", Courier, monospace;
+  --pw-font-size: 12pt;
+  --pw-line-h: 16px; /* 12pt Courier = exactly 6 lines/inch -> 96/6 = 16px */
+
+  /* Screenplay element offsets (from left content edge) */
+  --pw-character-indent: 211px;   /* 2.2" from content edge */
+  --pw-dialogue-indent: 96px;     /* 1.0" indent */
+  --pw-dialogue-w: 336px;         /* 3.5" wide */
+  --pw-paren-indent: 154px;       /* 1.6" indent */
+  --pw-paren-w: 221px;            /* 2.3" wide */
+
+  /* Colors */
+  --pw-bg: #ffffff;
+  --pw-text: #0d0d0d;
+  --pw-ui-bg: #e8e8e8;
+  --pw-shadow: 0 1px 4px rgba(0,0,0,0.12), 0 4px 20px rgba(0,0,0,0.08);
+  --pw-page-break-color: #b0b0b0;
+  --pw-attribution-color: #999;
+  --pw-placeholder-color: #bbb;
+  --pw-accent: #2563eb;
+}
+
+/* --- Wrapper ---------------------------------------- */
+
+.plotwell-editor-wrap {
+  background: var(--pw-ui-bg);
+  min-height: 100vh;
+  padding: 40px 0 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow-x: hidden; /* clip the wide page separators */
+}
+
+/* --- ProseMirror container = the page --------------- */
+
+.plotwell-editor-wrap .ProseMirror {
+  font-family: var(--pw-font);
+  font-size: var(--pw-font-size);
+  line-height: var(--pw-line-h);
+  color: var(--pw-text);
+  background: var(--pw-bg);
+  width: var(--pw-page-w);
+  min-height: var(--pw-page-h);
+  padding: var(--pw-margin-top) var(--pw-margin-right) var(--pw-margin-bottom) var(--pw-margin-left);
+  outline: none;
+  box-sizing: border-box;
+  caret-color: var(--pw-text);
+  position: relative;
+}
+
+/* Page 1 number in top-right */
+.plotwell-editor-wrap .ProseMirror::before {
+  content: "1.";
+  position: absolute;
+  top: calc(var(--pw-margin-top) - 24px);
+  right: var(--pw-margin-right);
+  font-family: var(--pw-font);
+  font-size: var(--pw-font-size);
+  line-height: var(--pw-line-h);
+  color: var(--pw-text);
+  pointer-events: none;
+}
+
+/* --- Block reset (vertical margins only!) ----------- */
+/* IMPORTANT: only reset top/bottom margins — DO NOT use shorthand `margin: 0`
+   because that wipes margin-left used for character, dialogue, parenthetical. */
+
+.plotwell-editor-wrap .ProseMirror p[data-type] {
+  margin-top: 0;
+  margin-bottom: 0;
+  padding: 0;
+  min-height: var(--pw-line-h);
+  line-height: var(--pw-line-h);
+  position: relative;
+}
+
+/* --- Spacing Rules (WGA/Hollywood Standard) ----------
+ *
+ * Scene Heading:  3em top (2 blank lines before)
+ *                 1em bottom (1 blank line after → to action)
+ * Action:         1em top (1 blank line between actions)
+ * Character:      1em top (1 blank line before cue)
+ * Dialogue:       0 (directly under character)
+ * Parenthetical:  0 (directly under character or within dialogue)
+ * Transition:     1em top
+ *
+ * First element on the page: no top margin.
+ * ---------------------------------------------------- */
+
+/* --- Scene Heading ---------------------------------- */
+
+.pm-scene-heading {
+  text-transform: uppercase;
+  font-weight: bold;
+  width: var(--pw-content-w);
+  margin-top: calc(var(--pw-line-h) * 3) !important;
+  margin-bottom: var(--pw-line-h) !important;
+}
+
+/* First child never gets top margin */
+.plotwell-editor-wrap .ProseMirror > p:first-child {
+  margin-top: 0 !important;
+}
+
+/* --- Action ----------------------------------------- */
+
+.pm-action {
+  width: var(--pw-content-w);
+  margin-top: var(--pw-line-h) !important;
+}
+
+/* Action directly after scene heading: collapse (heading already has bottom margin) */
+.pm-scene-heading + .pm-action {
+  margin-top: 0 !important;
+}
+
+/* --- Character cue ---------------------------------- */
+
+.pm-character {
+  margin-left: var(--pw-character-indent);
+  text-transform: uppercase;
+  margin-top: var(--pw-line-h) !important;
+  width: calc(var(--pw-content-w) - var(--pw-character-indent));
+}
+
+/* Character directly after dialogue: tighter spacing */
+.pm-dialogue + .pm-character,
+.pm-parenthetical + .pm-character {
+  margin-top: calc(var(--pw-line-h) * 0.5) !important;
+}
+
+/* --- Dialogue --------------------------------------- */
+
+.pm-dialogue {
+  margin-left: var(--pw-dialogue-indent);
+  width: var(--pw-dialogue-w);
+}
+
+/* --- Parenthetical ---------------------------------- */
+
+.pm-parenthetical {
+  margin-left: var(--pw-paren-indent);
+  width: var(--pw-paren-w);
+}
+
+.pm-parenthetical::before { content: "("; }
+.pm-parenthetical::after  { content: ")"; }
+
+/* --- Transition ------------------------------------- */
+
+.pm-transition {
+  text-align: right;
+  text-transform: uppercase;
+  width: var(--pw-content-w);
+  margin-top: var(--pw-line-h) !important;
+}
+
+/* FADE IN: is left-aligned (opening transition) */
+.pm-transition.pw-fade-in {
+  text-align: left;
+}
+
+/* --- Scene Numbers ---------------------------------- */
+
+.pw-scene-number {
+  font-family: var(--pw-font);
+  font-size: var(--pw-font-size);
+  line-height: var(--pw-line-h);
+  font-weight: bold;
+  color: var(--pw-text);
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  display: inline-block;
+  position: absolute;
+}
+
+.pw-scene-number-left {
+  right: calc(100% + 16px);
+  top: 0;
+}
+
+.pw-scene-number-right {
+  left: calc(var(--pw-content-w) + 16px);
+  top: 0;
+}
+
+/* --- Page Separator (Google Docs style) ------------- */
+/* The separator sits inside ProseMirror's content area (after padding).
+   We know exactly where the page edges are relative to content:
+     left edge = -padding-left = -144px
+     right edge = content-width + padding-right = 576 + 96 = 672px
+   We add 100px bleed on each side beyond the page. */
+
+.pw-page-separator {
+  display: block;
+  pointer-events: none;
+  user-select: none;
+  position: relative;
+  background: var(--pw-ui-bg);
+  /* page-width + 200px bleed total */
+  width: calc(var(--pw-page-w) + 200px);
+  /* Position: content-left - padding-left - 100px bleed */
+  margin-left: calc(-1 * var(--pw-margin-left) - 100px);
+  /* bottom-margin + 12px gap + top-margin */
+  height: calc(var(--pw-margin-bottom) + 12px + var(--pw-margin-top));
+}
+
+/* White strips aligned exactly with the page */
+.pw-page-margin-bottom,
+.pw-page-margin-top {
+  position: absolute;
+  /* 100px = the bleed on the left side */
+  left: 100px;
+  width: var(--pw-page-w);
+  background: var(--pw-bg);
+}
+
+.pw-page-margin-bottom {
+  top: 0;
+  height: var(--pw-margin-bottom);
+}
+
+.pw-page-margin-top {
+  bottom: 0;
+  height: var(--pw-margin-top);
+}
+
+/* Page number in top-right of the new page */
+.pw-page-header-number {
+  position: absolute;
+  bottom: 8px;
+  right: var(--pw-margin-right);
+  font-family: var(--pw-font);
+  font-size: var(--pw-font-size);
+  line-height: var(--pw-line-h);
+  color: var(--pw-text);
+}
+
+/* --- Empty node placeholders ------------------------ */
+
+.plotwell-editor-wrap .ProseMirror p[data-placeholder]:has(> br:only-child)::before {
+  content: attr(data-placeholder);
+  color: var(--pw-placeholder-color);
+  pointer-events: none;
+  position: absolute;
+  font-weight: normal;
+  text-transform: none;
+}
+
+/* --- Selection -------------------------------------- */
+
+.plotwell-editor-wrap .ProseMirror ::selection {
+  background: rgba(37, 99, 235, 0.15);
+}
+
+.plotwell-editor-wrap .ProseMirror .ProseMirror-selectednode {
+  outline: 1px solid rgba(37, 99, 235, 0.3);
+}
+
+/* --- Bubble Menu (selection toolbar) ---------------- */
+
+.pw-bubble-menu {
+  position: absolute;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  background: #1a1a1a;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2), 0 1px 4px rgba(0,0,0,0.1);
+  pointer-events: auto;
+  animation: pw-fade-in 0.12s ease-out;
+}
+
+.pw-bubble-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: #aaa;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  transition: all 0.1s;
+}
+
+.pw-bubble-menu button:hover {
+  background: #333;
+  color: #fff;
+}
+
+.pw-bubble-menu button.active {
+  background: var(--pw-accent);
+  color: #fff;
+}
+
+.pw-bubble-menu .pw-separator {
+  width: 1px;
+  height: 18px;
+  background: #444;
+  margin: 0 2px;
+}
+
+/* --- Type Badge (element label) --------------------- */
+
+.pw-type-badge {
+  position: absolute;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  pointer-events: auto;
+  animation: pw-fade-in 0.1s ease-out;
+}
+
+.pw-type-badge-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #888;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: transparent;
+  border: none;
+  transition: all 0.1s;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+
+.pw-type-badge-label:hover {
+  background: rgba(0,0,0,0.06);
+  color: #555;
+}
+
+.pw-type-badge-label::after {
+  content: "";
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 3.5px solid transparent;
+  border-right: 3.5px solid transparent;
+  border-top: 4px solid currentColor;
+  margin-left: 2px;
+}
+
+/* --- Type Dropdown ---------------------------------- */
+
+.pw-type-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.08);
+  padding: 4px;
+  min-width: 180px;
+  z-index: 60;
+  animation: pw-fade-in 0.1s ease-out;
+}
+
+.pw-type-dropdown button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 6px 10px;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 12px;
+  color: #333;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.08s;
+}
+
+.pw-type-dropdown button:hover {
+  background: #f0f4ff;
+}
+
+.pw-type-dropdown button.active {
+  color: var(--pw-accent);
+  font-weight: 600;
+}
+
+.pw-type-dropdown .pw-shortcut {
+  color: #aaa;
+  font-size: 10px;
+  font-family: "Courier Prime", monospace;
+}
+
+@keyframes pw-fade-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* --- Attribution ------------------------------------ */
+
+.plotwell-attribution {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 11px;
+  color: var(--pw-attribution-color);
+  text-decoration: none;
+  letter-spacing: 0.02em;
+}
+
+.plotwell-attribution:hover { color: #444; }
+.plotwell-attribution::before { content: "\2726"; font-size: 8px; }
+
+/* --- Reading Mode ----------------------------------- */
+
+.plotwell-editor-wrap .ProseMirror.pw-reading-mode {
+  caret-color: transparent;
+}
+
+.pw-reading-mode .pw-type-badge,
+.pw-reading-mode .pw-bubble-menu {
+  display: none !important;
+}
+
+/* --- Dark Mode -------------------------------------- */
+
+.plotwell-editor-wrap.pw-dark {
+  --pw-bg: #1a1d25;
+  --pw-text: #e2e8f0;
+  --pw-ui-bg: #0f1117;
+  --pw-shadow: 0 1px 4px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.2);
+  --pw-placeholder-color: #555;
+  --pw-attribution-color: #555;
+  --pw-accent: #3b82f6;
+}
+
+.plotwell-editor-wrap.pw-dark .pw-bubble-menu {
+  background: #2a2a2a;
+}
+
+.plotwell-editor-wrap.pw-dark .pw-type-dropdown {
+  background: #1a1d25;
+  border-color: #333;
+}
+
+.plotwell-editor-wrap.pw-dark .pw-type-dropdown button {
+  color: #ccc;
+}
+
+.plotwell-editor-wrap.pw-dark .pw-type-dropdown button:hover {
+  background: #2a2f3a;
+}
+
+.plotwell-editor-wrap.pw-dark .plotwell-attribution:hover {
+  color: #aaa;
+}
+
+/* --- Mobile (< 768px) ------------------------------- */
+/* Continuous scroll, no pagination, fluid width, tighter margins */
+
+@media (max-width: 768px) {
+  .plotwell-editor-wrap {
+    padding: 0 0 40px;
+  }
+
+  .plotwell-editor-wrap .ProseMirror {
+    width: 100%;
+    min-height: 100vh;
+    padding: 20px 16px 40px 24px;
+    font-size: 11pt;
+    line-height: 15px;
+    box-shadow: none;
+  }
+
+  /* No page 1 number on mobile */
+  .plotwell-editor-wrap .ProseMirror::before {
+    display: none;
+  }
+
+  /* Fluid content width */
+  .pm-scene-heading,
+  .pm-action,
+  .pm-transition {
+    width: 100%;
+  }
+
+  /* Scale indents proportionally */
+  .pm-character {
+    margin-left: 25%;
+    width: 75%;
+  }
+
+  .pm-dialogue {
+    margin-left: 10%;
+    width: 80%;
+  }
+
+  .pm-parenthetical {
+    margin-left: 15%;
+    width: 70%;
+  }
+
+  /* Hide scene numbers -- no margin space */
+  .pw-scene-number {
+    display: none;
+  }
+
+  /* Hide page separators -- continuous scroll */
+  .pw-page-separator {
+    display: none !important;
+  }
+
+  /* Hide type badge -- too cramped */
+  .pw-type-badge {
+    display: none !important;
+  }
+
+  /* Bubble menu: full width at bottom */
+  .pw-bubble-menu {
+    position: fixed;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    top: auto;
+    justify-content: center;
+    border-radius: 12px;
+    padding: 6px;
+    z-index: 100;
+  }
+
+  .pw-bubble-menu button {
+    width: 36px;
+    height: 36px;
+    font-size: 15px;
+  }
+
+  /* Spacing adjustments */
+  .pm-scene-heading,
+  .pm-action,
+  .pm-character,
+  .pm-transition {
+    margin-top: 15px !important;
+  }
+
+  .plotwell-editor-wrap .ProseMirror p[data-type] {
+    line-height: 15px;
+    min-height: 15px;
+  }
+}
