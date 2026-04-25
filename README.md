@@ -231,7 +231,7 @@ To remove attribution for commercial or white-label use, contact [info@plotwell.
 
 ## Built with @plotwell/editor
 
-- [plotwell](https://plotwell.co) — screenwriting and production platform for series creators
+- [plotwell](https://plotwell.co) — AI screenwriting and production platform for film & TV series creators
 
 Using it in your project? Open a PR to add it here.
 
