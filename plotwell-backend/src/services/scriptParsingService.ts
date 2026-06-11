@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { ensureProsemirrorFormat } from '../utils/formatDetection';
+import { canonicalizeCharacterName } from '../utils/characterIdentity';
 import {
   isSceneHeadingText,
   parseSceneHeadingIdentity,
@@ -9,18 +10,6 @@ const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
-
-/**
- * Normalize character name by stripping ALL parenthetical extensions
- * Removes (V.O.), (O.S.), (CONT'D), (MORE), and any other (...) content
- * This ensures EDWARD, EDWARD (V.O.), and EDWARD (V.O.)(CONT'D) are all recognized as EDWARD
- */
-function normalizeCharacterName(name: string): string {
-  return name
-    .replace(/\s*\([^)]*\)/g, '')  // Remove ALL parenthetical content: (anything)
-    .trim()
-    .toUpperCase();
-}
 
 export interface SceneData {
   scene_number: number;
@@ -175,7 +164,7 @@ export class ScriptParsingService {
 
       // Character names
       else if (nodeType === 'character' && currentScene) {
-        const character = normalizeCharacterName(text);
+        const character = canonicalizeCharacterName(text);
         if (character && !currentScene.characters!.includes(character)) {
           currentScene.characters!.push(character);
         }
@@ -378,7 +367,7 @@ export class ScriptParsingService {
       // Normalize character names and deduplicate
       scenes = scenes.map(scene => ({
         ...scene,
-        characters: [...new Set(scene.characters.map((char: string) => normalizeCharacterName(char)))]
+        characters: [...new Set(scene.characters.map((char: string) => canonicalizeCharacterName(char)))]
       }));
 
       // Convert scenes to storyboard format

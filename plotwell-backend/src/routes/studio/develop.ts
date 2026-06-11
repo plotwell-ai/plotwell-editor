@@ -14,6 +14,10 @@ import { extractUserId, addPricingService, PricingRequest } from '../../middlewa
 import { aiRouter, AIModelRouter } from '../../services/aiModelRouter';
 import { isEpisodic } from '../../utils/projectType';
 import {
+  canonicalizeCharacterName,
+  getCharacterIdentityKey,
+} from '../../utils/characterIdentity';
+import {
   canonicalizeLocationName,
   getLocationIdentityKey,
 } from '../../utils/locationIdentity';
@@ -639,7 +643,7 @@ Every turn you must either call a tool to create/save something, OR ask one focu
 
 ## WHEN TO CALL EACH TOOL
 
-**create_character** — call this whenever a character is named or implied. Do it immediately, even with partial info.
+**create_character** — call this when the user establishes a concrete story participant: a named character or a reusable unnamed role with narrative function. Do not create incidental people who are merely mentioned, compared, or used as background atmosphere.
 
 **update_character** — call this when the user asks to rename, correct, or revise an existing character and the target is clear.
 
@@ -1323,13 +1327,19 @@ async function executeTool(
     }
 
     if (toolName === 'create_character') {
-      // Check if character with same name exists
-      const { data: existing } = await supabase
+      const canonicalName = canonicalizeCharacterName(args.name);
+      if (!canonicalName) {
+        return { success: false, error: 'Missing character name' };
+      }
+
+      const { data: existingCharacters } = await supabase
         .from('characters')
-        .select('id')
-        .eq('project_id', projectId)
-        .ilike('name', args.name.trim())
-        .single();
+        .select('id, name')
+        .eq('project_id', projectId);
+      const requestedKey = getCharacterIdentityKey(canonicalName);
+      const existing = (existingCharacters || []).find(
+        (character: any) => getCharacterIdentityKey(character.name) === requestedKey
+      );
 
       if (existing) {
         const updateData: Record<string, any> = {};
@@ -1358,14 +1368,14 @@ async function executeTool(
           return { success: true, id: data.id, name: data.name };
         }
 
-        return { success: true, id: existing.id, name: args.name };
+        return { success: true, id: existing.id, name: existing.name };
       }
 
       const { data, error } = await supabase
         .from('characters')
         .insert({
           project_id: projectId,
-          name: args.name.trim(),
+          name: canonicalName,
           description: args.description || '',
           primary_role: args.primary_role || '',
           character_type: ['main', 'minor', 'ensemble', 'background'].includes(args.character_type) ? args.character_type : 'minor',
@@ -1410,23 +1420,30 @@ async function executeTool(
         const { data, error } = await supabase
           .from('characters')
           .select('id, name, description')
-          .eq('project_id', projectId)
-          .ilike('name', targetName);
+          .eq('project_id', projectId);
 
         if (error) {
           return { success: false, error: error.message };
         }
-        if (!data || data.length === 0) {
+        const targetKey = getCharacterIdentityKey(targetName);
+        const matches = (data || []).filter(
+          (character: any) => getCharacterIdentityKey(character.name) === targetKey
+        );
+        if (matches.length === 0) {
           return { success: false, error: `Character "${targetName}" not found` };
         }
-        if (data.length > 1) {
+        if (matches.length > 1) {
           return { success: false, error: `Multiple characters named "${targetName}" found; ask the user which one to update` };
         }
-        existing = data[0];
+        existing = matches[0];
       }
 
       const updateData: Record<string, any> = {};
-      if (typeof args.new_name === 'string' && args.new_name.trim()) updateData.name = args.new_name.trim();
+      if (typeof args.new_name === 'string' && args.new_name.trim()) {
+        const canonicalName = canonicalizeCharacterName(args.new_name);
+        if (!canonicalName) return { success: false, error: 'Invalid new character name' };
+        updateData.name = canonicalName;
+      }
       if (typeof args.description === 'string') updateData.description = args.description;
       if (typeof args.primary_role === 'string') updateData.primary_role = args.primary_role;
       if (['main', 'minor', 'ensemble', 'background'].includes(args.character_type)) {
@@ -1437,6 +1454,23 @@ async function executeTool(
 
       if (Object.keys(updateData).length === 0) {
         return { success: true, id: existing.id, name: existing.name, description: existing.description || '', entityType: 'character' };
+      }
+
+      if (updateData.name) {
+        const { data: projectCharacters, error: duplicateError } = await supabase
+          .from('characters')
+          .select('id, name')
+          .eq('project_id', projectId);
+        if (duplicateError) return { success: false, error: duplicateError.message };
+        const newKey = getCharacterIdentityKey(updateData.name);
+        const duplicate = (projectCharacters || []).find(
+          (character: any) =>
+            character.id !== existing!.id &&
+            getCharacterIdentityKey(character.name) === newKey
+        );
+        if (duplicate) {
+          return { success: false, error: `A matching character already exists: "${duplicate.name}"` };
+        }
       }
 
       const { data, error } = await supabase
@@ -1482,19 +1516,22 @@ async function executeTool(
         const { data, error } = await supabase
           .from('characters')
           .select('id, name')
-          .eq('project_id', projectId)
-          .ilike('name', targetName);
+          .eq('project_id', projectId);
 
         if (error) {
           return { success: false, error: error.message };
         }
-        if (!data || data.length === 0) {
+        const targetKey = getCharacterIdentityKey(targetName);
+        const matches = (data || []).filter(
+          (character: any) => getCharacterIdentityKey(character.name) === targetKey
+        );
+        if (matches.length === 0) {
           return { success: false, error: `Character "${targetName}" not found` };
         }
-        if (data.length > 1) {
+        if (matches.length > 1) {
           return { success: false, error: `Multiple characters named "${targetName}" found; ask the user which one to delete` };
         }
-        existing = data[0];
+        existing = matches[0];
       }
 
       const { error } = await supabase

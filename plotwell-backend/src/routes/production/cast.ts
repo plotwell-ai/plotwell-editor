@@ -241,6 +241,27 @@ router.post('/cast/:castId/scenes', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'projectId and sceneAssignments array are required' });
     }
 
+    // Verify cast belongs to project (and get it)
+    const { data: cast, error: castError } = await supabase
+      .from('production_cast')
+      .select('project_id')
+      .eq('id', castId)
+      .eq('project_id', projectId)
+      .single();
+
+    if (castError || !cast) {
+      return res.status(404).json({ error: 'Cast member not found in this project' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot assign cast', role: access.role });
+    }
+
     const assignments = await castService.assignCastToScenes(projectId, userId, castId, sceneAssignments);
 
     res.json({
@@ -269,6 +290,26 @@ router.delete('/cast/:castId/scenes/:sceneId', requireAuth, async (req, res) => 
     }
 
     const { castId, sceneId } = req.params;
+
+    // Lookup scene's project_id to verify access
+    const { data: scene, error: sceneError } = await supabase
+      .from('production_scene_data')
+      .select('project_id')
+      .eq('id', sceneId)
+      .single();
+
+    if (sceneError || !scene) {
+      return res.status(404).json({ error: 'Scene not found' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(scene.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot remove cast assignments', role: access.role });
+    }
 
     await castService.removeCastFromScene(castId, sceneId, userId);
 
@@ -332,6 +373,27 @@ router.post('/cast/:castId/days', requireAuth, async (req, res) => {
 
     if (!effectiveProjectId) {
       return res.status(400).json({ error: 'project_id is required' });
+    }
+
+    // Verify cast belongs to project
+    const { data: cast, error: castError } = await supabase
+      .from('production_cast')
+      .select('project_id')
+      .eq('id', castId)
+      .eq('project_id', effectiveProjectId)
+      .single();
+
+    if (castError || !cast) {
+      return res.status(404).json({ error: 'Cast member not found in this project' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(effectiveProjectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot modify cast day assignments', role: access.role });
     }
 
     // First, delete existing day assignments for this cast member
@@ -525,6 +587,26 @@ router.put('/cast/:castId/scenes/:sceneId/call-time', requireAuth, async (req, r
       return res.status(400).json({ error: 'callTime is required' });
     }
 
+    // Lookup scene's project_id to verify access
+    const { data: scene, error: sceneError } = await supabase
+      .from('production_scene_data')
+      .select('project_id')
+      .eq('id', sceneId)
+      .single();
+
+    if (sceneError || !scene) {
+      return res.status(404).json({ error: 'Scene not found' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(scene.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot update call times', role: access.role });
+    }
+
     const assignment = await castService.updateCallTime(castId, sceneId, userId, callTime);
 
     res.json({
@@ -574,10 +656,35 @@ router.get('/episode/:episodeId', requireAuth, async (req, res) => {
 // Assign cast member to episode
 router.post('/episode-assign', requireAuth, async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
     const { cast_member_id, episode_id, status = 'confirmed', notes } = req.body;
 
     if (!cast_member_id || !episode_id) {
       return res.status(400).json({ error: 'Missing cast_member_id or episode_id' });
+    }
+
+    // Lookup episode to get project_id
+    const { data: episode, error: episodeError } = await supabase
+      .from('episodes')
+      .select('project_id')
+      .eq('id', episode_id)
+      .single();
+
+    if (episodeError || !episode) {
+      return res.status(404).json({ error: 'Episode not found' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(episode.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot assign cast to episodes', role: access.role });
     }
 
     const { data, error } = await supabase
@@ -606,10 +713,35 @@ router.post('/episode-assign', requireAuth, async (req, res) => {
 // Remove cast member from episode
 router.delete('/episode-unassign', requireAuth, async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
     const { cast_member_id, episode_id } = req.body;
 
     if (!cast_member_id || !episode_id) {
       return res.status(400).json({ error: 'Missing cast_member_id or episode_id' });
+    }
+
+    // Lookup episode to get project_id
+    const { data: episode, error: episodeError } = await supabase
+      .from('episodes')
+      .select('project_id')
+      .eq('id', episode_id)
+      .single();
+
+    if (episodeError || !episode) {
+      return res.status(404).json({ error: 'Episode not found' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(episode.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot unassign cast from episodes', role: access.role });
     }
 
     const { error } = await supabase

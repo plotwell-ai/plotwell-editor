@@ -24,6 +24,11 @@ import {
 } from '../../services/collaborationServer';
 import { extractTextFromTipTapJSON } from '../../utils/aiHelpers';
 import {
+  canonicalizeCharacterName,
+  getCharacterIdentityKey,
+  normalizeCharacterCue,
+} from '../../utils/characterIdentity';
+import {
   canonicalizeLocationName,
   getLocationIdentityKey,
   getLocationNameFromSceneHeading,
@@ -186,7 +191,7 @@ function fountainToNodes(heading: string, body: string): any[] {
       // A recognised extension (O.S./V.O./CONT'D) is a definitive cue signal, even
       // when the dialogue that follows is itself ALL CAPS (e.g. shouting "¡MIAUUUUU!").
       if (hasCharExt) {
-        nodes.push({ type: 'character', content: [{ type: 'text', text: line }] });
+        nodes.push({ type: 'character', content: [{ type: 'text', text: normalizeCharacterCue(line) }] });
         state = 'after_character';
         prevBlank = false;
         continue;
@@ -212,7 +217,7 @@ function fountainToNodes(heading: string, body: string): any[] {
         );
 
         if (nextIsDialogue || !nextContent) {
-          nodes.push({ type: 'character', content: [{ type: 'text', text: line }] });
+          nodes.push({ type: 'character', content: [{ type: 'text', text: normalizeCharacterCue(line) }] });
           state = 'after_character';
           prevBlank = false;
           continue;
@@ -387,23 +392,13 @@ function extractSceneNodes(nodes: any[], sceneNumber: number): { startIdx: numbe
   return { startIdx, endIdx };
 }
 
-function normalizeCharacterName(name: string): string {
-  // Strip ALL parenthetical extensions so EDWARD, EDWARD (O.S.), EDWARD (V.O.)
-  // and EDWARD (CONT'D) all collapse to the same character.
-  return name
-    .replace(/\s*\([^)]*\)/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toUpperCase();
-}
-
 function extractCharacterNamesFromNodes(nodes: any[]): string[] {
   const names = new Map<string, string>();
 
   for (const node of nodes) {
     if (node.type !== 'character') continue;
     const rawName = node.content?.map((c: any) => c.text || '').join('') || '';
-    const normalized = normalizeCharacterName(rawName);
+    const normalized = canonicalizeCharacterName(rawName);
     if (!normalized) continue;
     names.set(normalized, normalized);
   }
@@ -424,10 +419,10 @@ async function syncSceneCharacters(
     .eq('project_id', projectId);
 
   const existingNames = new Set(
-    (existingChars || []).map((c: any) => normalizeCharacterName(c.name || ''))
+    (existingChars || []).map((c: any) => getCharacterIdentityKey(c.name)).filter(Boolean)
   );
 
-  const missingNames = names.filter(name => !existingNames.has(normalizeCharacterName(name)));
+  const missingNames = names.filter(name => !existingNames.has(getCharacterIdentityKey(name)));
   if (missingNames.length === 0) return { created: [] };
 
   const rows = missingNames.map(name => ({
@@ -1101,11 +1096,24 @@ async function executeWriteTool(
     }
 
     if (toolName === 'update_character') {
+      const requestedKey = getCharacterIdentityKey(args.character_name);
+      const { data: characters, error: lookupError } = await supabase
+        .from('characters')
+        .select('id, name')
+        .eq('project_id', projectId);
+      if (lookupError) return { success: false, error: lookupError.message };
+      const existing = (characters || []).find(
+        (character: any) => getCharacterIdentityKey(character.name) === requestedKey
+      );
+      if (!existing) {
+        return { success: false, error: `Character "${args.character_name}" not found. Use create_character instead.` };
+      }
+
       const { data: char, error } = await supabase
         .from('characters')
         .update({ description: args.description })
+        .eq('id', existing.id)
         .eq('project_id', projectId)
-        .ilike('name', args.character_name.trim())
         .select('id, name')
         .single();
 
@@ -1116,13 +1124,19 @@ async function executeWriteTool(
     }
 
     if (toolName === 'create_character') {
-      // Check if a character with this name already exists; update instead
-      const { data: existing } = await supabase
+      const canonicalName = canonicalizeCharacterName(args.name);
+      if (!canonicalName) {
+        return { success: false, error: 'Missing character name.' };
+      }
+
+      const { data: existingCharacters } = await supabase
         .from('characters')
         .select('id, name')
-        .eq('project_id', projectId)
-        .ilike('name', args.name.trim())
-        .single();
+        .eq('project_id', projectId);
+      const requestedKey = getCharacterIdentityKey(canonicalName);
+      const existing = (existingCharacters || []).find(
+        (character: any) => getCharacterIdentityKey(character.name) === requestedKey
+      );
 
       if (existing) {
         const updateData: Record<string, any> = {};
@@ -1141,7 +1155,7 @@ async function executeWriteTool(
         .from('characters')
         .insert({
           project_id: projectId,
-          name: args.name.trim(),
+          name: canonicalName,
           description: args.description || '',
           primary_role: args.primary_role || '',
           character_type: ['main', 'minor', 'ensemble', 'background'].includes(args.character_type) ? args.character_type : 'minor',

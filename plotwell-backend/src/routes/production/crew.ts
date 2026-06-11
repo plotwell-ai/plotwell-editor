@@ -22,6 +22,19 @@ router.post('/crew', requireAuth, async (req, res) => {
 
     const { projectId, name, role, department, contact, rate_per_day, rate_per_hour, availability_dates, notes, season_id } = req.body;
 
+    if (!projectId) {
+      return res.status(400).json({ error: 'projectId is required' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot create crew members', role: access.role });
+    }
+
     const insertData: Record<string, any> = {
       project_id: projectId,
       user_id: userId,
@@ -357,6 +370,27 @@ router.post('/crew/:crewId/days', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'project_id is required' });
     }
 
+    // Verify crew belongs to project
+    const { data: crew, error: crewError } = await supabase
+      .from('production_crew')
+      .select('project_id')
+      .eq('id', crewId)
+      .eq('project_id', effectiveProjectId)
+      .single();
+
+    if (crewError || !crew) {
+      return res.status(404).json({ error: 'Crew member not found in this project' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(effectiveProjectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot modify crew day assignments', role: access.role });
+    }
+
     // First, delete existing day assignments for this crew member
     const { error: deleteError } = await supabase
       .from('production_crew_days')
@@ -577,10 +611,35 @@ router.get('/episode/:episodeId', requireAuth, async (req, res) => {
 // Assign crew member to episode
 router.post('/episode-assign', requireAuth, async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
     const { crew_member_id, episode_id, status = 'confirmed', notes } = req.body;
 
     if (!crew_member_id || !episode_id) {
       return res.status(400).json({ error: 'Missing crew_member_id or episode_id' });
+    }
+
+    // Lookup episode to get project_id
+    const { data: episode, error: episodeError } = await supabase
+      .from('episodes')
+      .select('project_id')
+      .eq('id', episode_id)
+      .single();
+
+    if (episodeError || !episode) {
+      return res.status(404).json({ error: 'Episode not found' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(episode.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot assign crew to episodes', role: access.role });
     }
 
     const { data, error } = await supabase
@@ -609,10 +668,35 @@ router.post('/episode-assign', requireAuth, async (req, res) => {
 // Remove crew member from episode
 router.delete('/episode-unassign', requireAuth, async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
     const { crew_member_id, episode_id } = req.body;
 
     if (!crew_member_id || !episode_id) {
       return res.status(400).json({ error: 'Missing crew_member_id or episode_id' });
+    }
+
+    // Lookup episode to get project_id
+    const { data: episode, error: episodeError } = await supabase
+      .from('episodes')
+      .select('project_id')
+      .eq('id', episode_id)
+      .single();
+
+    if (episodeError || !episode) {
+      return res.status(404).json({ error: 'Episode not found' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(episode.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot unassign crew from episodes', role: access.role });
     }
 
     const { error } = await supabase

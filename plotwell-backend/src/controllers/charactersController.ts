@@ -2,6 +2,10 @@ import * as charactersService from "../services/charactersService";
 import * as imageService from "../services/imageService";
 import { Request, Response } from "express";
 import { resolveImageUrls, getSignedUrl, BUCKETS } from "../services/storageService";
+import {
+  canonicalizeCharacterName,
+  getCharacterIdentityKey,
+} from "../utils/characterIdentity";
 
 export async function getAll(req: Request, res: Response) {
   const { project_id, sort_by, sort_order, scope, episode_id, season_id } = req.query;
@@ -45,9 +49,21 @@ export async function create(req: Request, res: Response) {
   } = req.body;
   
   if (!name || !project_id) return res.status(400).json({ error: "Missing name or project_id" });
+  const canonicalName = canonicalizeCharacterName(name);
+  if (!canonicalName) return res.status(400).json({ error: "Invalid character name" });
+
+  const { data: existingCharacters, error: existingError } = await charactersService.getCharacters(project_id);
+  if (existingError) return res.status(500).json({ error: existingError.message });
+  const requestedKey = getCharacterIdentityKey(canonicalName);
+  const existingCharacter = (existingCharacters || []).find(
+    (character: any) => getCharacterIdentityKey(character.name) === requestedKey
+  );
+  if (existingCharacter) {
+    return res.json({ ...existingCharacter, reused_existing: true });
+  }
   
   const characterData = {
-    name,
+    name: canonicalName,
     description,
     project_id,
     character_type: character_type || 'minor',
@@ -83,6 +99,29 @@ export async function update(req: Request, res: Response) {
   
   
   if (!name) return res.status(400).json({ error: "Missing name" });
+  const canonicalName = canonicalizeCharacterName(name);
+  if (!canonicalName) return res.status(400).json({ error: "Invalid character name" });
+
+  const { data: currentCharacter, error: currentError } = await charactersService.getCharacterById(id);
+  if (currentError || !currentCharacter) {
+    return res.status(404).json({ error: currentError?.message || "Character not found" });
+  }
+
+  const { data: projectCharacters, error: charactersError } =
+    await charactersService.getCharacters(currentCharacter.project_id);
+  if (charactersError) return res.status(500).json({ error: charactersError.message });
+
+  const requestedKey = getCharacterIdentityKey(canonicalName);
+  const duplicate = (projectCharacters || []).find(
+    (character: any) =>
+      character.id !== id && getCharacterIdentityKey(character.name) === requestedKey
+  );
+  if (duplicate) {
+    return res.status(409).json({
+      error: "A matching character already exists",
+      existing_character_id: duplicate.id,
+    });
+  }
 
   // If we're removing the image (image_url is explicitly null), delete the old file first
   if ("image_url" in req.body && image_url === null) {
@@ -100,7 +139,7 @@ export async function update(req: Request, res: Response) {
   }
 
   const updates: any = { 
-    name, 
+    name: canonicalName,
     description,
     character_type,
     primary_role,

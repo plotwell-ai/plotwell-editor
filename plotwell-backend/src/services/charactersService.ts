@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { canonicalizeCharacterName } from "../utils/characterIdentity";
 
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
@@ -118,7 +119,7 @@ export async function createCharacter(characterData: any) {
   return await supabase
     .from("characters")
     .insert([{
-      name: name?.toUpperCase(), // Store in uppercase to match editor format
+      name: canonicalizeCharacterName(name),
       description,
       project_id,
       character_type,
@@ -138,7 +139,7 @@ export async function updateCharacter(id: string, updates: any) {
   // Convert name to uppercase if present in updates
   const updatesToApply = {
     ...updates,
-    ...(updates.name && { name: updates.name.toUpperCase() })
+    ...(updates.name && { name: canonicalizeCharacterName(updates.name) })
   };
 
   return await supabase

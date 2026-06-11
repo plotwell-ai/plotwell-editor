@@ -93,6 +93,8 @@ INSTRUCTIONS:
 3. ${params.scriptText ? 'PRIORITIZE SCRIPT - use dialogue cue names (all-caps above dialogue) as the canonical character name, not the full name from action lines' : 'Focus on characters discussed in conversation and concept'}
 4. Combine information from all sources for each character
 5. Include both speaking and non-speaking characters if they're important
+6. Remove only technical dialogue-cue extensions such as (V.O.), (O.S.), (O.C.), (CONT'D), (MORE), and (PRE-LAP) from the returned name
+7. Preserve narrative qualifiers such as (YOUNG), (OLDER), (MASKED), or (FLASHBACK); they may identify a deliberately distinct character entry
 
 ${CHARACTER_APPEARANCE_SPLIT_RULE}
 
@@ -138,6 +140,7 @@ INSTRUCTIONS:
 - Find ALL characters mentioned in the script (speaking and non-speaking)
 - ${params.existingCharactersList ? 'SKIP any characters that appear in the existing list above' : 'Extract all characters found'}
 - CANONICAL NAME RULE: A character's name must come from their dialogue cue line (the all-caps name that appears directly above their dialogue). This is ALWAYS the correct name. For example, if a character speaks as "WILL" in dialogue cues but is introduced in an action line as "WILL BLOOM, 30s", their name is "WILL".
+- CUE EXTENSION RULE: Remove only technical extensions such as (V.O.), (O.S.), (O.C.), (CONT'D), (MORE), and (PRE-LAP). Preserve narrative qualifiers such as (YOUNG), (OLDER), (MASKED), or (FLASHBACK).
 - Action lines and scene descriptions may contain full names or descriptions, but never override the dialogue cue name — use that context only for background/non-speaking characters who never have a dialogue cue.
 - DEDUPLICATION RULE: If a name from an action line appears to be the full name of a character who already has a dialogue cue (e.g., "EDWARD BLOOM" in an action line and "EDWARD" as a dialogue cue), treat them as the SAME character. Use the dialogue cue name ("EDWARD") and enrich the description with context from the action line. Never create two separate entries for the same person.
 - Extract both named characters and important unnamed roles (e.g., "WAITER", "POLICE OFFICER")

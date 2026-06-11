@@ -1320,6 +1320,26 @@ router.post('/scenes/:sceneId/lock', requireAuth, async (req, res) => {
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
+    // Lookup scene's project_id to verify access
+    const { data: scene, error: sceneError } = await supabase
+      .from('production_scene_data')
+      .select('project_id')
+      .eq('id', sceneId)
+      .single();
+
+    if (sceneError || !scene) {
+      return res.status(404).json({ error: 'Scene not found' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(scene.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot lock scenes', role: access.role });
+    }
+
     await lockScene(sceneId);
 
     res.json({
@@ -1347,6 +1367,26 @@ router.post('/scenes/:sceneId/unlock', requireAuth, async (req, res) => {
 
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Lookup scene's project_id to verify access
+    const { data: scene, error: sceneError } = await supabase
+      .from('production_scene_data')
+      .select('project_id')
+      .eq('id', sceneId)
+      .single();
+
+    if (sceneError || !scene) {
+      return res.status(404).json({ error: 'Scene not found' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(scene.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot unlock scenes', role: access.role });
     }
 
     await unlockScene(sceneId);
@@ -2070,9 +2110,35 @@ router.get('/breakdown-items/:sceneDataId', requireAuth, async (req, res) => {
 // Link asset to scene
 router.post('/breakdown-items', requireAuth, async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
     const { scene_data_id, asset_id, project_id, notes } = req.body;
     if (!scene_data_id || !asset_id || !project_id) {
       return res.status(400).json({ error: 'Missing required fields: scene_data_id, asset_id, project_id' });
+    }
+
+    // Verify scene_data belongs to this project
+    const { data: sceneData, error: sceneError } = await supabase
+      .from('production_scene_data')
+      .select('project_id')
+      .eq('id', scene_data_id)
+      .eq('project_id', project_id)
+      .single();
+
+    if (sceneError || !sceneData) {
+      return res.status(404).json({ error: 'Scene not found in this project' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot add breakdown items', role: access.role });
     }
 
     const { data, error } = await supabase
@@ -2092,7 +2158,45 @@ router.post('/breakdown-items', requireAuth, async (req, res) => {
 // Unlink asset from scene
 router.delete('/breakdown-items/:id', requireAuth, async (req, res) => {
   try {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
     const { id } = req.params;
+
+    // Lookup breakdown item to get scene_data_id and project_id
+    const { data: item, error: itemError } = await supabase
+      .from('scene_breakdown_items')
+      .select('scene_data_id, project_id')
+      .eq('id', id)
+      .single();
+
+    if (itemError || !item) {
+      return res.status(404).json({ error: 'Breakdown item not found' });
+    }
+
+    // Verify scene_data belongs to project
+    const { data: sceneData, error: sceneError } = await supabase
+      .from('production_scene_data')
+      .select('project_id')
+      .eq('id', item.scene_data_id)
+      .eq('project_id', item.project_id)
+      .single();
+
+    if (sceneError || !sceneData) {
+      return res.status(404).json({ error: 'Scene not found in this project' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(item.project_id, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot remove breakdown items', role: access.role });
+    }
+
     const { error } = await supabase.from('scene_breakdown_items').delete().eq('id', id);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
