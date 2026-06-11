@@ -1,5 +1,5 @@
 const TECHNICAL_CUE_EXTENSION =
-  /\s*\(\s*(?:V\.?\s*O\.?|O\.?\s*S\.?|O\.?\s*C\.?|CONT(?:INUE)?D?'?\.?|CONT|MORE|SUPER|SUBTITLE|FILTER|PRE-?LAP)\s*\)\s*$/i;
+  /\s*\(\s*(?:V\.?\s*O\.?|O\.?\s*S\.?|O\.?\s*C\.?|CONT(?:INUE)?(?:D|['’]D)?\.?|MORE|SUPER|SUBTITLE|FILTER|PRE-?LAP)\s*\)\s*$/i;
 
 export interface CharacterCandidate {
   name?: unknown;
@@ -27,7 +27,7 @@ export function normalizeCharacterCue(value: unknown): string {
     .replace(/\(\s*V\.?\s*O\.?\s*\)/g, '(V.O.)')
     .replace(/\(\s*O\.?\s*S\.?\s*\)/g, '(O.S.)')
     .replace(/\(\s*O\.?\s*C\.?\s*\)/g, '(O.C.)')
-    .replace(/\(\s*CONT(?:INUE)?D?'?\.?\s*\)/g, "(CONT'D)")
+    .replace(/\(\s*CONT(?:INUE)?(?:D|['’]D)?\.?\s*\)/g, "(CONT'D)")
     .replace(/\(\s*PRE-?\s*LAP\s*\)/g, '(PRE-LAP)')
     .replace(/\s+/g, ' ')
     .replace(/([^\s])\(/g, '$1 (')
@@ -63,6 +63,12 @@ function preferRicherText(current: unknown, incoming: unknown): unknown {
     return incoming.trim();
   }
   return current;
+}
+
+function preferDefined(current: unknown, incoming: unknown): unknown {
+  if (typeof current === 'string' && current.trim()) return current;
+  if (typeof incoming === 'string' && incoming.trim()) return incoming.trim();
+  return current ?? incoming;
 }
 
 function preferHigherNumber(current: unknown, incoming: unknown): unknown {
@@ -104,9 +110,9 @@ export function dedupeCharacterCandidates<T extends CharacterCandidate>(candidat
       appearance: preferRicherText(existing.appearance, candidate.appearance),
       description: preferRicherText(existing.description, candidate.description),
       character_type: mergeCharacterType(existing.character_type, candidate.character_type),
-      primary_role: preferRicherText(existing.primary_role, candidate.primary_role),
+      primary_role: preferDefined(existing.primary_role, candidate.primary_role),
       importance_level: preferHigherNumber(existing.importance_level, candidate.importance_level),
-      status: existing.status || candidate.status,
+      status: preferDefined(existing.status, candidate.status),
       story_arc: preferRicherText(existing.story_arc, candidate.story_arc),
       motivations: preferRicherText(existing.motivations, candidate.motivations),
       fears: preferRicherText(existing.fears, candidate.fears),

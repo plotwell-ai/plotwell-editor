@@ -4,22 +4,12 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { canonicalizeCharacterName } from '../utils/characterIdentity';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
-
-/**
- * Normalize character name by stripping ALL parenthetical extensions
- * Removes (V.O.), (O.S.), (CONT'D), (MORE), and any other (...) content
- */
-function normalizeCharacterName(name: string): string {
-  return name
-    .replace(/\s*\([^)]*\)/g, '')  // Remove ALL parenthetical content: (anything)
-    .trim()
-    .toUpperCase();
-}
 
 // =====================================================
 // TYPES
@@ -176,7 +166,7 @@ export class SceneBreakdownExportService {
           location: ps.location || scriptScene?.location || '',
           timeOfDay: scriptScene?.time_of_day || 'day',
           synopsis: scriptScene?.action_content?.substring(0, 300) || '',
-          characters: [...new Set(((scriptScene?.characters || []) as string[]).map((c: string) => normalizeCharacterName(c)))],
+          characters: [...new Set(((scriptScene?.characters || []) as string[]).map(canonicalizeCharacterName).filter(Boolean))],
           complexity: ps.complexity || 'medium',
           estimatedShootDays: ps.estimated_shoot_days || 0,
           budgetEstimate: ps.budget_estimate || 0,
@@ -200,7 +190,7 @@ export class SceneBreakdownExportService {
           location: scene.location || '',
           timeOfDay: scene.time_of_day || scene.timeOfDay || 'day',
           synopsis: scene.action_content?.substring(0, 300) || scene.content?.substring(0, 300) || '',
-          characters: [...new Set(((scene.characters || []) as string[]).map((c: string) => normalizeCharacterName(c)))],
+          characters: [...new Set(((scene.characters || []) as string[]).map(canonicalizeCharacterName).filter(Boolean))],
           complexity: 'medium' as const,
           estimatedShootDays: 0,
           budgetEstimate: 0,

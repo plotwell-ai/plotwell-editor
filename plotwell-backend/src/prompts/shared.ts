@@ -28,6 +28,8 @@ export const JSON_FORMAT_REQUIREMENTS = `CRITICAL REQUIREMENTS:
 - Use "INT./EXT." only when the same scene genuinely moves between interior and exterior
 - Reuse the exact canonical location name from the provided project locations when one matches; do not create spelling or punctuation variants
 - Character names must be ALL UPPERCASE when introducing dialogue
+- Reuse the exact canonical character name from the provided project characters when one matches
+- Technical cue extensions such as (V.O.), (O.S.), and (CONT'D) may follow a character name, but they never create a new character identity
 - Action paragraphs describe what we SEE, not internal thoughts
 - Use proper node types: sceneHeading, action, character, dialogue, parenthetical, transition
 - For parenthetical nodes: do NOT include parentheses in the text (the editor adds them automatically). Write "sitting down" not "(sitting down)"

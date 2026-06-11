@@ -530,46 +530,6 @@ router.get('/cast-by-day/:projectId/:shootDate', requireAuth, async (req, res) =
 });
 
 /**
- * Bulk create cast from characters database
- * POST /api/production/cast/:projectId/bulk-from-characters
- */
-router.post('/cast/:projectId/bulk-from-characters', requireAuth, async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ error: 'User not authenticated' });
-    }
-
-    const { projectId } = req.params;
-
-    // Verify project access
-    const access = await checkProjectAccessForUser(projectId, userId);
-    if (!access.hasAccess) {
-      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
-    }
-    if (!access.canEdit) {
-      return res.status(403).json({ error: 'Read-only access - viewers cannot create cast members', role: access.role });
-    }
-
-    const cast = await castService.bulkCreateCastFromCharacters(projectId, userId);
-
-    res.json({
-      success: true,
-      cast,
-      count: cast.length,
-      message: `Created ${cast.length} cast members from characters`
-    });
-
-  } catch (error) {
-    console.error('Error bulk creating cast:', error);
-    res.status(500).json({
-      error: 'Failed to bulk create cast',
-      details: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
-/**
  * Update call time for cast in a scene
  * PUT /api/production/cast/:castId/scenes/:sceneId/call-time
  */

@@ -727,6 +727,8 @@ Your conversational replies to the user can match the language they write in.
 ## FOUNTAIN FORMAT FOR CONTENT
 Action lines are plain text.
 Character names are ALL CAPS on their own line.
+Reuse the exact existing project character name whenever one matches.
+Technical cue extensions such as (V.O.), (O.S.), and (CONT'D) may follow that name, but do not invent a separate character for them.
 Dialogue is on the line directly after the character name.
 Parentheticals are in (parentheses) between character and dialogue.
 

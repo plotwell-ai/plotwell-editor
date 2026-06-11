@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { parseScriptContent } from './scriptParsingService';
 import { generateSceneId } from './sceneIdentityService';
 import { BUCKETS, resolveImageUrls } from './storageService';
+import { getCharacterIdentityKey } from '../utils/characterIdentity';
 import { getLocationIdentityKey } from '../utils/locationIdentity';
 
 const supabase = createClient(
@@ -77,17 +78,6 @@ export interface GraphEdge {
 export interface ProjectGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
-}
-
-/** Uppercase + trim + strip parentheticals, mirroring scriptParsingService. */
-function normalizeName(name: string | null | undefined): string {
-  if (!name) return '';
-  return name
-    .replace(/\s*\([^)]*\)/g, '')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toUpperCase();
 }
 
 /**
@@ -239,18 +229,27 @@ export async function buildProjectGraph(
 
   // ── Nodes + lookup maps ───────────────────────────────────────────────────
   const characterByName = new Map<string, (typeof characters)[number]>();
+  const characterNodeIdByEntityId = new Map<string, string>();
+  const characterRepresentativeByKey = new Map<string, (typeof characters)[number]>();
   for (const c of characters) {
-    nodes.push({
-      id: `character:${c.id}`,
-      type: 'character',
-      entityId: c.id,
-      label: c.name,
-      subtitle: c.primary_role || c.character_type || undefined,
-      imageUrl: c.image_url,
-      meta: { characterType: c.character_type },
-    });
-    const key = normalizeName(c.name);
-    if (key && !characterByName.has(key)) characterByName.set(key, c);
+    const key = getCharacterIdentityKey(c.name) || c.id;
+    let representative = characterRepresentativeByKey.get(key);
+    if (!representative) {
+      representative = c;
+      characterRepresentativeByKey.set(key, c);
+      nodes.push({
+        id: `character:${c.id}`,
+        type: 'character',
+        entityId: c.id,
+        label: c.name,
+        subtitle: c.primary_role || c.character_type || undefined,
+        imageUrl: c.image_url,
+        meta: { characterType: c.character_type },
+      });
+      if (key) characterByName.set(key, c);
+    }
+
+    characterNodeIdByEntityId.set(c.id, `character:${representative.id}`);
   }
 
   const locationByName = new Map<string, (typeof locations)[number]>();
@@ -308,7 +307,7 @@ export async function buildProjectGraph(
       subtitle: c.character_name && c.actor_name ? c.character_name : c.category || undefined,
       meta: { category: c.category },
     });
-    const charMatch = characterByName.get(normalizeName(c.character_name));
+    const charMatch = characterByName.get(getCharacterIdentityKey(c.character_name));
     if (charMatch) addEdge(`cast:${c.id}`, `character:${charMatch.id}`, 'plays');
   }
 
@@ -367,7 +366,10 @@ export async function buildProjectGraph(
       meta: { episodeNumber: e.episode_number, scriptId: e.script_id },
     });
   }
-  for (const r of epChars) addEdge(`episode:${r.episode_id}`, `character:${r.character_id}`, 'part_of');
+  for (const r of epChars) {
+    const characterNodeId = characterNodeIdByEntityId.get(r.character_id);
+    if (characterNodeId) addEdge(`episode:${r.episode_id}`, characterNodeId, 'part_of');
+  }
   for (const r of epLocs) {
     const locationNodeId = locationNodeIdByEntityId.get(r.location_id);
     if (locationNodeId) addEdge(`episode:${r.episode_id}`, locationNodeId, 'part_of');
@@ -477,7 +479,7 @@ export async function buildProjectGraph(
 
         // character -> scene (soft, from script text)
         for (const rawName of scene.characters || []) {
-          const charMatch = characterByName.get(normalizeName(rawName));
+          const charMatch = characterByName.get(getCharacterIdentityKey(rawName));
           if (charMatch) addEdge(`character:${charMatch.id}`, nodeId, 'appears_in', 'soft');
         }
 
@@ -536,7 +538,8 @@ export async function buildProjectGraph(
           if (locationNodeId) addEdge(shotId, locationNodeId, 'located_at');
         }
         for (const cid of (p.linked_character_ids as string[] | null) ?? []) {
-          addEdge(shotId, `character:${cid}`, 'appears_in');
+          const characterNodeId = characterNodeIdByEntityId.get(cid);
+          if (characterNodeId) addEdge(shotId, characterNodeId, 'appears_in');
         }
       }
     }

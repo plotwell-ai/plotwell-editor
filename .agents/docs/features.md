@@ -34,6 +34,24 @@ one canonical identity:
 - The relationship map may coalesce historical duplicate rows for display, but
   destructive database consolidation requires an explicit merge workflow.
 
+## Character Cues And Identity
+
+Character generation, screenplay parsing, imports, and character creation must
+share one identity rule:
+
+- Preserve the full dialogue cue in the script, including technical extensions
+  such as `(V.O.)`, `(O.S.)`, and `(CONT'D)`.
+- Remove only recognized technical cue extensions when deriving identity.
+  Preserve narrative qualifiers such as `(YOUNG)`, `(OLDER)`, or `(MASKED)`.
+- Compare backend character identities through
+  `plotwell-backend/src/utils/characterIdentity.ts` before inserting. Frontend
+  importers and statistics use `plotwell-app/src/lib/parsers/characterIdentity.ts`.
+- AI extraction must deduplicate its own response batch. Invalid AI JSON must
+  fail without creating placeholder characters.
+- The relationship map may coalesce historical technical duplicates for display
+  and route their edges to one representative node. Database consolidation still
+  requires an explicit merge workflow.
+
 ## Storyboard Editor
 
 Primary view: `plotwell-app/src/components/views/StoryboardView.tsx`.
