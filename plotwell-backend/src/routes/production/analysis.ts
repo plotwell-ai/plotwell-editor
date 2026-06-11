@@ -25,6 +25,15 @@ router.post('/analyze-script', requireAuth, async (req, res) => {
       return res.status(401).json({ error: 'User not authenticated properly' });
     }
 
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot analyze scripts', role: access.role });
+    }
+
     const result = await ProductionAnalysisService.analyzeScriptAndCreateCards(
       projectId,
       userId,
@@ -119,6 +128,20 @@ router.post('/optimize-budget', requireAuth, async (req, res) => {
       targetPercentage = 15,
       categories: rawCategories
     } = BudgetOptimizeSchema.parse(req.body);
+
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot optimize budgets', role: access.role });
+    }
 
     // Convert categories object to array if needed
     let categories: string[] = ['cast', 'crew', 'post'];
@@ -320,6 +343,15 @@ router.post('/budget-scenarios', requireAuth, async (req, res) => {
     const userId = getUserId(req);
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot generate budget scenarios', role: access.role });
     }
 
     // Gather comprehensive project context
@@ -574,6 +606,15 @@ router.post('/budget-health', requireAuth, async (req, res) => {
     const userId = getUserId(req);
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot analyze budget health', role: access.role });
     }
 
     // Gather comprehensive project context
@@ -864,6 +905,20 @@ When mentioning money in text (insights, risks, recommendations), always use DOL
 router.post('/optimize-schedule', requireAuth, async (req, res) => {
   try {
     const { projectId, scenes } = ScheduleOptimizeSchema.parse(req.body);
+
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot optimize schedules', role: access.role });
+    }
 
     const schedulePrompt = `
 Optimize the shooting schedule for this production:
