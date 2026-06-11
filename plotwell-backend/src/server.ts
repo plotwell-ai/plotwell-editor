@@ -6,10 +6,12 @@ import dotenv from "dotenv";
 const envFileArg = process.argv.find(arg => arg.startsWith('--env-file='));
 const envPath = envFileArg ? envFileArg.split('=')[1] : '.env';
 dotenv.config({ path: envPath, override: true });
-console.log(`🔧 Loaded env from: ${envPath} (STRIPE_PAID_MONTHLY_PRICE_ID=${process.env.STRIPE_PAID_MONTHLY_PRICE_ID || 'NOT SET'})`);
+const DEBUG_AI = process.env.DEBUG_AI === 'true';
+if (DEBUG_AI) console.log(`🔧 Loaded env from: ${envPath} (STRIPE_PAID_MONTHLY_PRICE_ID=${process.env.STRIPE_PAID_MONTHLY_PRICE_ID || 'NOT SET'})`);
 
 import express from "express";
 import aiRouter from "./routes/ai/index";
+import videosRouter from "./routes/ai/videos";
 import projectsRouter from "./routes/projects";
 import charactersRouter from "./routes/characters";
 import characterImagesRouter from "./routes/characterImages";
@@ -36,6 +38,9 @@ import billingRouter from "./routes/billing";
 import unifiedBillingRouter from "./routes/unifiedBilling";
 import aiCreditsRouter from "./routes/aiCredits";
 import publicShareRouter from "./routes/publicShare";
+import toolsRouter from "./routes/tools";
+import aiTaskEventsRouter from "./routes/ai/taskEvents";
+import studioRouter from "./routes/studio/index";
 import { setupCollaborationServer, closeCollaborationServer } from "./services/collaborationServer";
 import { requireAuth } from "./middleware/auth";
 import { ipAllowlistMiddleware } from "./middleware/ipAllowlist";
@@ -55,7 +60,22 @@ const aiLimiter = rateLimit({
     if (req.user?.id) return req.user.id;
     // Use the helper for safe IP fallback
     return ipKeyGenerator(req.ip || 'unknown');
-  }
+  },
+  skip: (req) => req.method === 'GET',
+});
+
+// Video generation (MEGA beta) has its own, more generous limiter: animating a
+// whole scene means several POSTs in a row, and the client polls job status
+// (GET, already exempt). The real cost ceiling is credits, not this limiter.
+const videoLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30,
+  message: "Too many video requests, please try again later.",
+  keyGenerator: (req) => {
+    if (req.user?.id) return req.user.id;
+    return ipKeyGenerator(req.ip || 'unknown');
+  },
+  skip: (req) => req.method === 'GET',
 });
 
 const scriptDoctorLimiter = rateLimit({
@@ -65,7 +85,8 @@ const scriptDoctorLimiter = rateLimit({
   keyGenerator: (req) => {
     if (req.user?.id) return req.user.id;
     return ipKeyGenerator(req.ip || 'unknown');
-  }
+  },
+  skip: (req) => req.method === 'GET',
 });
 
 // Rate limiter for billing/payment endpoints (prevent checkout spam, verify-payment abuse)
@@ -140,6 +161,8 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Add production/dev frontend URLs from environment variable
+// Supports comma-separated list: app URL + tool subdomains
+// e.g. FRONTEND_URL=https://app.plotwell.co,https://scripts.plotwell.co,https://storyboard.plotwell.co,https://budget.plotwell.co
 if (process.env.FRONTEND_URL) {
   const frontendUrls = process.env.FRONTEND_URL.split(',').map(url => url.trim());
   allowedOrigins.push(...frontendUrls);
@@ -185,9 +208,25 @@ const extendedTimeoutMiddleware = (req: express.Request, res: express.Response, 
   next();
 };
 
+// AI task events SSE — lightweight push notifications, no rate limit needed
+app.use("/api/ai", aiTaskEventsRouter);
+// Studio v2 — must be before aiRouter so /api/ai/studio/* doesn't fall into the generic ai handler
+app.use("/api/ai/studio", requireAuth, aiLimiter, extendedTimeoutMiddleware, studioRouter);
+// Video generation — mounted before the generic aiRouter so it uses videoLimiter (not the tight 5/min aiLimiter)
+app.use("/api/ai", requireAuth, videoLimiter, extendedTimeoutMiddleware, videosRouter);
 app.use("/api/ai", requireAuth, aiLimiter, extendedTimeoutMiddleware, aiRouter);
 // Public routes - MUST come before generic /api routes to avoid requireAuth
 app.use("/api/pricing", pricingRouter);
+
+// Public app config — exposes feature flags to the frontend (no secrets)
+app.get("/api/config", (_req, res) => {
+  const onboardingMode = process.env.ONBOARDING_MODE || 'freemium';
+  const trialDays = parseInt(process.env.TRIAL_DAYS || '7', 10);
+  res.json({
+    onboarding_mode: onboardingMode, // 'freemium' | 'trial_7d'
+    trial_days: trialDays,
+  });
+});
 
 // Collaboration routes - has some public endpoints (invitation details) so must come before generic /api routes
 // Auth is handled per-route inside the router
@@ -196,6 +235,10 @@ app.use("/api/collaboration", collaborationRouter);
 // Public share routes - has public endpoints (share view) so must come before generic /api routes
 // Auth is handled per-route inside the router
 app.use("/api/share", publicShareRouter);
+
+// Mini-tool routes — mix of public (scenes/preview) and auth-required (generate)
+// Auth is handled per-route inside the router
+app.use("/api/tools", toolsRouter);
 
 // Protected routes
 app.use("/api/projects", requireAuth, crudLimiter, projectsRouter);
@@ -218,6 +261,7 @@ app.use("/api/conversations", requireAuth, crudLimiter, conversationsRouter);
 app.use("/api/usage", requireAuth, usageRouter);
 // AI Credits - one-time purchases (requires auth + rate limiting)
 app.use("/api/ai-credits", requireAuth, aiCreditsLimiter, aiCreditsRouter);
+// Production planning suite — available to all authenticated users (production features are on the free plan)
 app.use("/api/production", requireAuth, extendedTimeoutMiddleware, productionRouter);
 const userLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -246,12 +290,12 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 function gracefulShutdown(signal: string) {
-  console.log(`🛑 ${signal} received, starting graceful shutdown...`);
+  if (DEBUG_AI) console.log(`🛑 ${signal} received, starting graceful shutdown...`);
   closeCollaborationServer();
 
   // Stop accepting new connections and drain in-flight requests
   server.close(() => {
-    console.log('✅ All connections drained, exiting.');
+    if (DEBUG_AI) console.log('✅ All connections drained, exiting.');
     process.exit(0);
   });
 
@@ -268,7 +312,7 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 const PORT = process.env.PORT || 3001;
 const server = app.listen(PORT, () => {
   const isDev = process.env.NODE_ENV !== 'production';
-  console.log(`Server running on port ${PORT}`);
+  if (DEBUG_AI) console.log(`Server running on port ${PORT}`);
   
   // Environment check
   const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_JWT_SECRET'];
@@ -277,18 +321,18 @@ const server = app.listen(PORT, () => {
   if (missingVars.length > 0) {
     console.error("Missing required environment variables:", missingVars);
   } else {
-    console.log("All required environment variables loaded");
+    if (DEBUG_AI) console.log("All required environment variables loaded");
   }
   
   if (isDev) {
-    console.log("DEV MODE: Simulated payments enabled");
-    console.log("   - Use /api/pricing/dev/* endpoints for testing");
-    console.log("   - No real Stripe charges will be processed");
+    if (DEBUG_AI) console.log("DEV MODE: Simulated payments enabled");
+    if (DEBUG_AI) console.log("   - Use /api/pricing/dev/* endpoints for testing");
+    if (DEBUG_AI) console.log("   - No real Stripe charges will be processed");
   } else {
-    console.log("🏭 PRODUCTION MODE: Real Stripe integration required");
+    if (DEBUG_AI) console.log("🏭 PRODUCTION MODE: Real Stripe integration required");
   }
   
-  console.log("Server listening and ready to accept connections");
+  if (DEBUG_AI) console.log("Server listening and ready to accept connections");
   
   // Setup collaboration WebSocket server
   setupCollaborationServer(server);
@@ -309,7 +353,7 @@ const server = app.listen(PORT, () => {
         .lt('updated_at', cutoff)
         .select('id');
       if (data?.length) {
-        console.log(`🗑️ Purged ${data.length} soft-deleted project(s) older than 90 days`);
+        if (DEBUG_AI) console.log(`🗑️ Purged ${data.length} soft-deleted project(s) older than 90 days`);
       }
     } catch (err) {
       console.error('❌ Soft delete cleanup error:', err);

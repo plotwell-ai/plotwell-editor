@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { ScriptParsingService } from './scriptParsingService';
+import { ensureProsemirrorFormat } from '../utils/formatDetection';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -72,7 +73,7 @@ export class ScriptExportService {
         registrationNumber: project?.registration_number
       };
 
-      // Parse TipTap content to Final Draft XML
+      // Parse ProseMirror content to Final Draft XML
       const fdxContent = this.convertToFinalDraftXML(title, content, options, titlePageData);
       
       return fdxContent;
@@ -125,7 +126,7 @@ export class ScriptExportService {
         registrationNumber: project?.registration_number
       };
 
-      // Convert TipTap content to Word Document format
+      // Convert ProseMirror content to Word Document format
       const docxBuffer = this.convertToDocx(title, content, options, titlePageData);
       
       return docxBuffer;
@@ -186,7 +187,7 @@ export class ScriptExportService {
         registrationNumber: project?.registration_number
       };
 
-      // Parse TipTap content to Fountain markup
+      // Parse ProseMirror content to Fountain markup
       const fountainContent = this.convertToFountain(title, content, options, titlePageData);
 
       return fountainContent;
@@ -197,59 +198,54 @@ export class ScriptExportService {
   }
 
   /**
-   * Convert TipTap JSON content to Final Draft XML
+   * Convert ProseMirror JSON content to Final Draft XML
    */
   private static convertToFinalDraftXML(title: string, content: any, options: ExportOptions, titlePageData?: TitlePageData): string {
     if (!content || !content.content || !Array.isArray(content.content)) {
       return this.getEmptyFinalDraftXML(title);
     }
 
+    // Ensure content is in ProseMirror format
+    content = ensureProsemirrorFormat(content);
+
     let xmlContent = '';
     let sceneNumber = 1;
-    
-    // Process each paragraph/element
+
+    // Process each node
     for (const node of content.content) {
-      if (node.type !== 'paragraph' || !node.content) continue;
+      if (!node.content) continue;
 
       const text = node.content
         .filter((content: any) => content.type === 'text')
         .map((content: any) => content.text)
         .join('');
 
-      const className = node.attrs?.class || '';
-
-      // Convert based on element type
-      switch (className) {
-        case 'scene-heading':
+      // Convert based on node type
+      switch (node.type) {
+        case 'sceneHeading':
           const sceneText = options.includeSceneNumbers ? `${sceneNumber}. ${text}` : text;
           xmlContent += this.createFDXElement('Scene Heading', sceneText);
           sceneNumber++;
           break;
-          
+
         case 'action':
-        case 'shot-description':
           xmlContent += this.createFDXElement('Action', text);
           break;
-          
-        case 'character-name':
+
+        case 'character':
           xmlContent += this.createFDXElement('Character', text.toUpperCase());
           break;
-          
+
         case 'dialogue':
           xmlContent += this.createFDXElement('Dialogue', text);
           break;
-          
+
         case 'parenthetical':
           xmlContent += this.createFDXElement('Parenthetical', text);
           break;
-          
+
         case 'transition':
-        case 'aligned':
           xmlContent += this.createFDXElement('Transition', text.toUpperCase());
-          break;
-          
-        case 'shot-heading':
-          xmlContent += this.createFDXElement('Shot', text.toUpperCase());
           break;
 
         default:
@@ -264,77 +260,80 @@ export class ScriptExportService {
   }
 
   /**
-   * Convert TipTap JSON content to Fountain format
+   * Convert ProseMirror JSON content to Fountain format
    */
   private static convertToFountain(title: string, content: any, options: ExportOptions, titlePageData?: TitlePageData): string {
     if (!content || !content.content || !Array.isArray(content.content)) {
       return this.getEmptyFountain(title);
     }
 
+    // Ensure content is in ProseMirror format
+    content = ensureProsemirrorFormat(content);
+
     let fountainContent = '';
     let sceneNumber = 1;
     let lastElementType = '';
-    
+
     // Add Fountain title page with all available metadata
     if (options.includeTitlePage !== false && titlePageData) {
       fountainContent += `Title: ${titlePageData.title}\n`;
-      
+
       if (titlePageData.author) {
         fountainContent += `Author: ${titlePageData.author}\n`;
       }
-      
+
       if (titlePageData.basedOn) {
         fountainContent += `Source: ${titlePageData.basedOn}\n`;
       }
-      
+
       if (titlePageData.draftDate) {
         fountainContent += `Date: ${titlePageData.draftDate}\n`;
       }
-      
+
       if (titlePageData.contactInfo) {
         fountainContent += `Contact: ${titlePageData.contactInfo}\n`;
       }
-      
+
       if (titlePageData.draftNumber) {
         fountainContent += `Draft: ${titlePageData.draftNumber}\n`;
       }
-      
+
       if (titlePageData.copyrightNotice) {
         fountainContent += `Copyright: ${titlePageData.copyrightNotice}\n`;
       }
-      
+
       if (titlePageData.registrationNumber) {
         fountainContent += `Registration: ${titlePageData.registrationNumber}\n`;
       }
-      
+
       fountainContent += '\n';
     } else {
       // Fallback to simple title
       fountainContent += `Title: ${title}\n\n`;
     }
-    
+
     fountainContent += `FADE IN:\n\n`;
 
-    // Process each paragraph/element
+    // Process each node
     for (const node of content.content) {
-      if (node.type !== 'paragraph' || !node.content) continue;
+      if (!node.content) continue;
 
       const text = node.content
         .filter((content: any) => content.type === 'text')
         .map((content: any) => content.text)
         .join('');
 
-      const className = node.attrs?.class || '';
+      const nodeType = node.type;
 
       // Add spacing based on element transitions
-      const needsSpacing = this.needsFountainSpacing(lastElementType, className);
+      const needsSpacing = this.needsFountainSpacing(lastElementType, nodeType);
       if (needsSpacing) {
         fountainContent += '\n';
       }
 
-      // Convert based on element type
-      switch (className) {
-        case 'scene-heading':
+      // Convert based on node type
+      switch (nodeType) {
+        case 'sceneHeading':
           const sceneText = options.includeSceneNumbers ? `${sceneNumber}. ${text}` : text;
           // Fountain scene headings are automatically detected if they start with INT./EXT.
           // Force scene heading with period if needed
@@ -342,26 +341,24 @@ export class ScriptExportService {
           fountainContent += isAutoDetected ? `${sceneText}\n` : `.${sceneText}\n`;
           sceneNumber++;
           break;
-          
+
         case 'action':
-        case 'shot-description':
           fountainContent += `${text}\n`;
           break;
-          
-        case 'character-name':
+
+        case 'character':
           fountainContent += `${text.toUpperCase()}\n`;
           break;
-          
+
         case 'dialogue':
           fountainContent += `${text}\n`;
           break;
-          
+
         case 'parenthetical':
           fountainContent += `${text}\n`;
           break;
-          
+
         case 'transition':
-        case 'aligned':
           // Fountain transitions end with TO:
           const transitionText = text.toUpperCase();
           if (transitionText.endsWith('TO:') || transitionText === 'FADE IN:' || transitionText === 'FADE OUT:') {
@@ -369,10 +366,6 @@ export class ScriptExportService {
           } else {
             fountainContent += `> ${transitionText}\n`; // Force transition with >
           }
-          break;
-          
-        case 'shot-heading':
-          fountainContent += `@${text}\n`; // Shot headings with @ prefix
           break;
 
         default:
@@ -382,11 +375,11 @@ export class ScriptExportService {
           }
       }
 
-      lastElementType = className;
+      lastElementType = nodeType;
     }
 
     fountainContent += '\nFADE OUT.\n\nTHE END';
-    
+
     return fountainContent;
   }
 
@@ -546,16 +539,15 @@ ${content}
   private static needsFountainSpacing(lastType: string, currentType: string): boolean {
     // Add spacing between different element types for readability
     if (!lastType) return false;
-    
+
     const spacingRules: { [key: string]: string[] } = {
-      'scene-heading': ['action', 'shot-description', 'character-name'],
-      'action': ['scene-heading', 'character-name', 'transition'],
-      'shot-description': ['scene-heading', 'character-name', 'transition'],
-      'dialogue': ['scene-heading', 'action', 'shot-description', 'character-name', 'transition'],
-      'parenthetical': ['scene-heading', 'action', 'shot-description', 'character-name'],
-      'transition': ['scene-heading'],
+      'sceneHeading': ['action', 'character'],
+      'action': ['sceneHeading', 'character', 'transition'],
+      'dialogue': ['sceneHeading', 'action', 'character', 'transition'],
+      'parenthetical': ['sceneHeading', 'action', 'character'],
+      'transition': ['sceneHeading'],
     };
-    
+
     const needsSpacing = spacingRules[lastType]?.includes(currentType);
     return !!needsSpacing;
   }
@@ -565,91 +557,94 @@ ${content}
   }
 
   /**
-   * Convert TipTap JSON content to Word Document
+   * Convert ProseMirror JSON content to Word Document
    */
   private static convertToDocx(title: string, content: any, options: ExportOptions, titlePageData?: TitlePageData): Buffer {
     // Simple DOCX implementation using basic text format
     // For now, we'll convert to plain text with proper formatting
-    
+
     let docxContent = '';
-    
+
     // Add title page if enabled
     if (options.includeTitlePage !== false && titlePageData) {
       docxContent += `${titlePageData.title.toUpperCase()}\n\n`;
-      
+
       if (titlePageData.author) {
         docxContent += `by\n${titlePageData.author}\n\n`;
       }
-      
+
       if (titlePageData.basedOn) {
         docxContent += `${titlePageData.basedOn}\n\n`;
       }
-      
+
       // Add spacing before bottom info
       docxContent += '\n\n\n\n\n\n\n\n\n\n';
-      
+
       // Left side info
       if (titlePageData.draftNumber) {
         docxContent += `${titlePageData.draftNumber}\n`;
       }
-      
+
       if (titlePageData.draftDate) {
         docxContent += `${titlePageData.draftDate}\n`;
       }
-      
+
       if (titlePageData.copyrightNotice) {
         docxContent += `${titlePageData.copyrightNotice}\n`;
       }
-      
+
       if (titlePageData.registrationNumber) {
         docxContent += `Registration: ${titlePageData.registrationNumber}\n`;
       }
-      
+
       // Contact info (right aligned in concept)
       if (titlePageData.contactInfo) {
         const lines = titlePageData.contactInfo.split('\n');
         docxContent += '\n' + lines.join('\n');
       }
-      
+
       docxContent += '\n\n\f'; // Page break
     }
-    
+
+    // Ensure content is in ProseMirror format
+    if (content) {
+      content = ensureProsemirrorFormat(content);
+    }
+
     // Convert script content
     if (content && content.content && Array.isArray(content.content)) {
-      docxContent += this.convertTipTapToPlainText(content.content);
+      docxContent += this.convertProsemirrorToPlainText(content.content);
     }
-    
+
     // Create a simple text buffer (for now, could be enhanced with actual DOCX format)
     return Buffer.from(docxContent, 'utf-8');
   }
 
   /**
-   * Convert TipTap content to plain text for DOCX
+   * Convert ProseMirror content to plain text for DOCX
    */
-  private static convertTipTapToPlainText(content: any[]): string {
+  private static convertProsemirrorToPlainText(content: any[]): string {
     let text = '';
-    
+
     for (const node of content) {
-      if (node.type === 'paragraph') {
-        const className = node.attrs?.class || '';
-        
-        if (className.includes('scene-heading')) {
-          text += (node.content?.[0]?.text || '').toUpperCase() + '\n\n';
-        } else if (className.includes('character')) {
-          text += '                    ' + (node.content?.[0]?.text || '').toUpperCase() + '\n';
-        } else if (className.includes('dialogue')) {
-          text += '          ' + (node.content?.[0]?.text || '') + '\n';
-        } else if (className.includes('parenthetical')) {
-          text += '                    (' + (node.content?.[0]?.text || '') + ')\n';
-        } else if (className.includes('action')) {
-          text += (node.content?.[0]?.text || '') + '\n\n';
-        } else {
-          // Default paragraph
-          text += (node.content?.[0]?.text || '') + '\n';
-        }
+      if (node.type === 'sceneHeading') {
+        text += (node.content?.[0]?.text || '').toUpperCase() + '\n\n';
+      } else if (node.type === 'character') {
+        text += '                    ' + (node.content?.[0]?.text || '').toUpperCase() + '\n';
+      } else if (node.type === 'dialogue') {
+        text += '          ' + (node.content?.[0]?.text || '') + '\n';
+      } else if (node.type === 'parenthetical') {
+        text += '                    (' + (node.content?.[0]?.text || '') + ')\n';
+      } else if (node.type === 'action') {
+        text += (node.content?.[0]?.text || '') + '\n\n';
+      } else if (node.type === 'transition') {
+        text += '                                        ' + (node.content?.[0]?.text || '').toUpperCase() + '\n\n';
+      } else {
+        // Default paragraph
+        text += (node.content?.[0]?.text || '') + '\n';
       }
     }
-    
+
     return text;
   }
 

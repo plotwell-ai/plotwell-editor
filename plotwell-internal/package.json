@@ -1,0 +1,18 @@
+{
+  "name": "plotwell-internal",
+  "private": true,
+  "scripts": {
+    "dev:all": "pnpm --filter @internal/app dev",
+    "dev": "pnpm -r --parallel run dev",
+    "dev:shell": "pnpm --filter shell dev",
+    "dev:blog": "pnpm --filter @tools/blog dev",
+    "dev:social": "pnpm --filter @tools/social dev",
+    "dev:seo": "pnpm --filter @tools/seo dev",
+    "dev:sem": "pnpm --filter @tools/sem dev",
+    "dev:email": "pnpm --filter @tools/email dev",
+    "dev:accounting": "pnpm --filter @tools/accounting dev",
+    "dev:analytics": "pnpm --filter @tools/analytics dev",
+    "build": "pnpm -r run build",
+    "install:all": "pnpm install"
+  }
+}

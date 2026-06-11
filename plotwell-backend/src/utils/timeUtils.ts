@@ -11,7 +11,7 @@
  *
  * Examples:
  * export SIMULATED_DATE="2024-09-24T18:11:00Z"
- * SIMULATED_DATE="2024-09-24T18:11:00Z" npm run dev
+ * SIMULATED_DATE="2024-09-24T18:11:00Z" npm run dev:local
  *
  * Production behavior:
  * - SIMULATED_DATE is ignored in production (NODE_ENV=production)

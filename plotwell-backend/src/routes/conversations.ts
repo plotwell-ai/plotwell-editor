@@ -94,18 +94,19 @@ const checkConversationAccess = (requireWriteAccess: boolean = false) => {
 
 // Get all conversations for a project
 router.get("/", requireAuth, extractUserId, checkProjectAccess, async (req, res) => {
-  const { project_id } = req.query;
-  
+  const { project_id, phase } = req.query;
+
   if (!project_id) {
     return res.status(400).json({ error: "project_id is required" });
   }
 
   try {
-    const { data: conversations, error } = await supabase
+    let query = supabase
       .from("conversations")
       .select(`
         id,
         title,
+        phase,
         created_at,
         updated_at,
         is_archived,
@@ -119,6 +120,16 @@ router.get("/", requireAuth, extractUserId, checkProjectAccess, async (req, res)
       .eq("project_id", project_id)
       .eq("is_archived", false)
       .order("updated_at", { ascending: false });
+
+    // Phase-scope the list when requested. Legacy rows (phase IS NULL) are treated
+    // as 'develop' so older conversations remain visible in the Develop phase.
+    if (phase === "develop") {
+      query = query.or("phase.eq.develop,phase.is.null");
+    } else if (phase === "write" || phase === "plan") {
+      query = query.eq("phase", phase);
+    }
+
+    const { data: conversations, error } = await query;
 
     if (error) {
       return res.status(500).json({ error: error.message });
@@ -152,6 +163,7 @@ router.get("/:conversation_id", requireAuth, extractUserId, checkConversationAcc
         id,
         title,
         project_id,
+        phase,
         created_at,
         updated_at,
         conversation_messages(

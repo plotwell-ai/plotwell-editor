@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+html, body, :root {
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  background: #ffffff;
+  color: #0f172a;
+}
+
+/* ── Tool-embedded editor overrides ──────────────────────────────── */
+
+.pw-tool-preview {
+  min-height: unset !important;
+  padding-bottom: 32px !important;
+}
+
+.pw-tool-preview .pw-page-separator {
+  display: none !important;
+}
+
+.pw-tool-preview .ProseMirror {
+  box-shadow: none !important;
+  min-height: unset !important;
+}

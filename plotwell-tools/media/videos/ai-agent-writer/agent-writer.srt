@@ -1,0 +1,31 @@
+1
+00:00:00,000 --> 00:00:03,000
+AI agentic writing model
+
+2
+00:00:04,000 --> 00:00:10,000
+Writing the order for the agent
+
+3
+00:00:10,000 --> 00:00:13,000
+Planning your scene...
+
+4
+00:00:13,000 --> 00:00:23,000
+Reviewing the execution plan
+
+5
+00:00:27,000 --> 00:00:40,500
+Writing the new order
+
+6
+00:00:44,000 --> 00:00:53,000
+Reviewing the second plan
+
+7
+00:00:53,000 --> 00:00:56,000
+Writing your scene...
+
+8
+00:00:56,000 --> 00:01:01,000
+Scene added to your script

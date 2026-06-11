@@ -5,6 +5,7 @@ import { requireAuth, checkProjectAccess, checkProjectAccessByRecordId } from ".
 import { upload } from "../services/imageService";
 import { uploadLocationImage, deleteLocationImage } from "../services/locationImageService";
 import { resolveImageUrls, getSignedUrl, BUCKETS } from "../services/storageService";
+import { canonicalizeLocationName, getLocationIdentityKey } from "../utils/locationIdentity";
 
 const router = Router();
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
@@ -94,9 +95,26 @@ router.post("/", requireAuth, checkProjectAccess, checkProjectArchived, async (r
   } = req.body;
   if (!name || !project_id) return res.status(400).json({ error: "Missing name or project_id" });
 
+  const canonicalName = canonicalizeLocationName(name);
+  if (!canonicalName) return res.status(400).json({ error: "Invalid location name" });
+
+  const { data: existingLocations, error: existingError } = await supabase
+    .from("locations")
+    .select("*")
+    .eq("project_id", project_id);
+  if (existingError) return res.status(500).json({ error: existingError.message });
+
+  const requestedKey = getLocationIdentityKey(canonicalName);
+  const existingLocation = (existingLocations || []).find(
+    (location: any) => getLocationIdentityKey(location.name) === requestedKey
+  );
+  if (existingLocation) {
+    return res.json({ ...existingLocation, reused_existing: true });
+  }
+
   // Ensure valid values for constraint fields
   const validatedData: any = {
-    name: name.toUpperCase(), // Store in uppercase to match scene heading format
+    name: canonicalName,
     address,
     description,
     project_id,
@@ -172,10 +190,39 @@ router.put("/:id", requireAuth, checkProjectAccessByRecordId("locations", true),
   } = req.body;
 
   if (!name) return res.status(400).json({ error: "Missing name" });
+  const canonicalName = canonicalizeLocationName(name);
+  if (!canonicalName) return res.status(400).json({ error: "Invalid location name" });
+
+  const { data: currentLocation, error: currentError } = await supabase
+    .from("locations")
+    .select("project_id")
+    .eq("id", id)
+    .single();
+  if (currentError || !currentLocation) {
+    return res.status(404).json({ error: currentError?.message || "Location not found" });
+  }
+
+  const { data: projectLocations, error: locationsError } = await supabase
+    .from("locations")
+    .select("id, name")
+    .eq("project_id", currentLocation.project_id);
+  if (locationsError) return res.status(500).json({ error: locationsError.message });
+
+  const requestedKey = getLocationIdentityKey(canonicalName);
+  const duplicate = (projectLocations || []).find(
+    (location: any) =>
+      location.id !== id && getLocationIdentityKey(location.name) === requestedKey
+  );
+  if (duplicate) {
+    return res.status(409).json({
+      error: "A matching location already exists",
+      existing_location_id: duplicate.id,
+    });
+  }
 
   // Build update object with proper defaults for constraint fields
   const updates: any = {
-    name: name.toUpperCase(), // Store in uppercase to match scene heading format
+    name: canonicalName,
     address,
     description
   };

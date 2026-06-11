@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import multer from 'multer';
 import { checkProjectArchived, checkProjectArchivedByRecordId } from "../middleware/archiveMiddleware";
 import { requireFeature, extractUserId, PricingRequest } from "../middleware/pricingMiddleware";
+import { PRICING_PLANS } from '../config/pricingPlans';
 import { requireAuth } from "../middleware/auth";
 import { Response, NextFunction } from 'express';
 import { PricingService } from '../services/pricingService';
@@ -65,14 +66,15 @@ const checkDocumentCreationLimit = async (req: PricingRequest, res: Response, ne
     const currentDocumentCount = documentCount || 0;
     const planId = subscription?.plan_id || 'free';
     
-    // Check limits - free plan: 2 documents, others: unlimited
-    if (planId === 'free' && currentDocumentCount >= 2) {
-      return res.status(403).json({ 
-        error: `Document creation limit reached. Free plan allows 2 documents maximum.`,
+    // Documents are unlimited — no cap enforced
+    const freeDocLimit = PRICING_PLANS.free.limits.documents;
+    if (freeDocLimit !== -1 && planId === 'free' && currentDocumentCount >= freeDocLimit) {
+      return res.status(403).json({
+        error: `Document creation limit reached. Free plan allows ${freeDocLimit} document maximum.`,
         type: 'LIMIT_EXCEEDED',
         current_plan: planId,
         current_count: currentDocumentCount,
-        limit: 2,
+        limit: freeDocLimit,
         action_required: 'upgrade'
       });
     }
@@ -132,6 +134,9 @@ const requireDocumentVersionControl = async (req: PricingRequest, res: Response,
         // User is a collaborator, use project owner's subscription
         isCollaborator = true;
         targetUserId = project.user_id;
+      } else {
+        // Not a collaborator — access denied
+        return res.status(403).json({ error: 'Access denied' });
       }
     }
 
@@ -393,20 +398,52 @@ router.get("/types", async (req, res) => {
 
 // DOCUMENT CRUD ENDPOINTS
 
-// Get pinned documents for a project (for sidebar quick links)
+// Get sidebar quick links for a project
+// Always returns up to 3 items: pinned first, then fills remaining slots with recent non-pinned docs
 router.get("/pinned", requireAuth, extractUserId, async (req, res) => {
   const { project_id } = req.query;
   if (!project_id) return res.status(400).json({ error: "Missing project_id" });
 
-  const { data, error } = await supabase
+  const MAX_LINKS = 3;
+
+  // Fetch pinned documents
+  const { data: pinned, error: pinnedError } = await supabase
     .from("project_documents")
     .select("id, document_type, title")
     .eq("project_id", project_id)
     .eq("is_pinned", true)
-    .order("updated_at", { ascending: false });
+    .order("updated_at", { ascending: false })
+    .limit(MAX_LINKS);
 
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data || []);
+  if (pinnedError) return res.status(500).json({ error: pinnedError.message });
+
+  const pinnedDocs = pinned || [];
+  const remaining = MAX_LINKS - pinnedDocs.length;
+
+  if (remaining <= 0) {
+    return res.json({ documents: pinnedDocs, source: "pinned" });
+  }
+
+  // Fill remaining slots with most recently updated non-pinned docs
+  const pinnedIds = pinnedDocs.map(d => d.id);
+  let recentQuery = supabase
+    .from("project_documents")
+    .select("id, document_type, title")
+    .eq("project_id", project_id)
+    .eq("is_pinned", false)
+    .order("updated_at", { ascending: false })
+    .limit(remaining);
+
+  if (pinnedIds.length > 0) {
+    recentQuery = recentQuery.not("id", "in", `(${pinnedIds.join(",")})`);
+  }
+
+  const { data: recent, error: recentError } = await recentQuery;
+  if (recentError) return res.status(500).json({ error: recentError.message });
+
+  const documents = [...pinnedDocs, ...(recent || [])];
+  const source = pinnedDocs.length > 0 ? "pinned" : "recent";
+  res.json({ documents, source });
 });
 
 // Toggle pin status of a document

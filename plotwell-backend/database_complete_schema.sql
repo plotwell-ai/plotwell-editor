@@ -65,6 +65,12 @@ BEGIN
     COALESCE((new.raw_user_meta_data->>'marketing_consent')::boolean, false),
     CASE WHEN (new.raw_user_meta_data->>'marketing_consent')::boolean = true THEN NOW() ELSE NULL END
   );
+
+  -- Initialize free subscription for every new user
+  INSERT INTO public.user_subscriptions (user_id, plan_id, status)
+  VALUES (new.id, 'free', 'active')
+  ON CONFLICT (user_id) DO NOTHING;
+
   RETURN new;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -120,7 +126,7 @@ CREATE TABLE IF NOT EXISTS public.projects (
   user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
   name TEXT NOT NULL, -- API uses 'name', NOT 'title'
   description TEXT,
-  project_type TEXT NOT NULL DEFAULT 'film' CHECK (project_type IN ('film', 'movie', 'series', 'short', 'commercial', 'music_video', 'documentary', 'reel', 'theatre', 'course', 'fiction')), -- Updated to match frontend values with default
+  project_type TEXT NOT NULL DEFAULT 'film' CHECK (project_type IN ('film', 'movie', 'series', 'vertical_series', 'short', 'commercial', 'music_video', 'documentary', 'reel', 'theatre', 'course', 'fiction')), -- Updated to match frontend values with default
   status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'in_progress', 'review', 'completed', 'paused', 'archived')),
   content_language TEXT DEFAULT 'en',
   language TEXT,
@@ -130,6 +136,7 @@ CREATE TABLE IF NOT EXISTS public.projects (
   production_scope TEXT DEFAULT 'single' CHECK (production_scope IN ('single', 'global')),
   currency TEXT DEFAULT 'USD',
   video_format TEXT DEFAULT '16:9' CHECK (video_format IN ('16:9', '9:16', '1:1', '4:5')),
+  visual_style TEXT NOT NULL DEFAULT 'cinematic' CHECK (visual_style IN ('cinematic', '3d-animation', 'anime', 'noir', 'watercolor', 'comic', 'concept-art', 'stop-motion', 'storybook', 'oil-painting', 'retro-film', 'cyberpunk')), -- AI render look (project-wide)
   cost_multiplier DECIMAL(5,2) DEFAULT 1.00,
   prod_script_id UUID,
   active_script_id UUID, -- Will add FK constraint after scripts table is created
@@ -714,6 +721,9 @@ CREATE TABLE IF NOT EXISTS public.episode_crew (
 CREATE INDEX IF NOT EXISTS idx_episode_crew_episode ON public.episode_crew(episode_id);
 CREATE INDEX IF NOT EXISTS idx_episode_crew_member ON public.episode_crew(crew_member_id);
 
+ALTER TABLE public.episode_cast ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.episode_crew ENABLE ROW LEVEL SECURITY;
+
 COMMENT ON TABLE public.episode_cast IS 'Links cast members to specific episodes they appear in';
 COMMENT ON TABLE public.episode_crew IS 'Links crew members to specific episodes they work on';
 
@@ -731,6 +741,7 @@ CREATE TABLE IF NOT EXISTS public.scripts (
   content JSONB,
   scenes JSONB, -- Cached parsed scenes for performance (world-class production planner)
   scene_version_hash VARCHAR(64), -- Hash of scenes for change detection (world-class production planner)
+  page_count INTEGER, -- Exact page count as measured by the editor's DOM paginator (null until first save)
   is_ai_generated BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -1150,12 +1161,24 @@ CREATE TABLE IF NOT EXISTS public.storyboard_panels (
   scene_description TEXT NOT NULL,
   shot_type TEXT DEFAULT 'medium-shot',
   camera_movement TEXT DEFAULT 'static',
+  camera_direction TEXT DEFAULT '',  -- explicit per-shot camera move; drives image-to-video animation
   duration TEXT DEFAULT '3',
   notes TEXT DEFAULT '',
+  lighting TEXT DEFAULT '',
+  mood TEXT DEFAULT '',
   image_url TEXT,
+  image_fidelity TEXT CHECK (image_fidelity IS NULL OR image_fidelity IN ('sketch', 'cinematic')),  -- fidelity the image was generated with; gates Animate (cinematic only)
   is_ai_generated BOOLEAN DEFAULT FALSE,
   linked_character_ids UUID[] DEFAULT '{}',  -- Array of character UUIDs linked to this panel (max 3)
   linked_location_id UUID REFERENCES public.locations(id) ON DELETE SET NULL,  -- Optional location for AI image reference
+  -- Video (image-to-video) generation — MEGA beta. Lifecycle: NULL -> processing -> completed | failed
+  video_url TEXT,            -- storage path in the generated-video bucket
+  video_status TEXT CHECK (video_status IS NULL OR video_status IN ('processing', 'completed', 'failed')),
+  video_job_id TEXT,         -- OpenRouter video generation job id
+  video_duration INTEGER,    -- clip length in seconds
+  video_model TEXT,          -- provider model slug used (e.g. x-ai/grok-imagine-video)
+  video_error TEXT,          -- last failure message, if any
+  video_created_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -1174,6 +1197,11 @@ ON public.storyboard_panels(project_id, episode_id, scene_number);
 -- Index for linked location ID
 CREATE INDEX IF NOT EXISTS idx_storyboard_panels_location
 ON public.storyboard_panels(linked_location_id);
+
+-- Index for the video status poller to find in-flight jobs quickly
+CREATE INDEX IF NOT EXISTS idx_storyboard_panels_video_job
+ON public.storyboard_panels(video_job_id)
+WHERE video_job_id IS NOT NULL;
 
 -- Partial unique indexes for scene-aware panel numbering
 -- Film storyboards with scenes: panel_number must be unique per project + scene
@@ -1200,6 +1228,24 @@ COMMENT ON COLUMN public.storyboard_panels.episode_id IS 'Optional episode refer
 COMMENT ON COLUMN public.storyboard_panels.scene_id IS 'Content-based SHA-256 hash for stable scene identity - survives scene reordering. NULL for legacy storyboards created before scene-based refactor';
 COMMENT ON COLUMN public.storyboard_panels.scene_number IS 'Display order of scene in script (1, 2, 3...). NULL for legacy storyboards';
 COMMENT ON COLUMN public.storyboard_panels.scene_heading IS 'Cached scene heading (e.g., INT. COFFEE SHOP - DAY) for quick UI display without parsing script. NULL for legacy storyboards';
+
+-- Scene/episode video reels (MEGA beta assembly). Stitches shot clips into one
+-- vertical video via ffmpeg. scope 'scene' (scene_id set) or 'episode' (scene_id NULL).
+CREATE TABLE IF NOT EXISTS public.video_renders (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+  episode_id UUID REFERENCES public.episodes(id) ON DELETE CASCADE,
+  scene_id VARCHAR(64),
+  scope TEXT NOT NULL CHECK (scope IN ('scene', 'episode')),
+  status TEXT NOT NULL DEFAULT 'processing' CHECK (status IN ('processing', 'completed', 'failed')),
+  video_url TEXT,
+  clip_count INTEGER,
+  error TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_video_renders_project_episode
+ON public.video_renders (project_id, episode_id);
 
 -- =====================================================
 -- VERSION CONTROL SYSTEM
@@ -1232,10 +1278,11 @@ CREATE TABLE IF NOT EXISTS public.user_subscriptions (
   stripe_subscription_id TEXT,
   stripe_customer_id TEXT,
   stripe_plan_price_id TEXT,
-  status TEXT DEFAULT 'active' CHECK (status IN ('active', 'cancelled', 'expired', 'trial', 'past_due', 'unpaid', 'incomplete', 'inactive')),
+  status TEXT DEFAULT 'active' CHECK (status IN ('active', 'cancelled', 'expired', 'trial', 'trialing', 'past_due', 'unpaid', 'incomplete', 'inactive')),
   trial_ends_at TIMESTAMPTZ,
   additional_projects INTEGER DEFAULT 0,
   additional_collaborators INTEGER DEFAULT 0,
+  billing_cycle TEXT DEFAULT 'monthly' CHECK (billing_cycle IN ('monthly', 'yearly')),
   billing_cycle_start DATE DEFAULT CURRENT_DATE,
   last_billing_date DATE DEFAULT CURRENT_DATE,
   current_period_start TIMESTAMPTZ,
@@ -1409,6 +1456,8 @@ CREATE TABLE IF NOT EXISTS public.production_assets (
 CREATE INDEX IF NOT EXISTS idx_production_assets_project ON public.production_assets(project_id);
 CREATE INDEX IF NOT EXISTS idx_production_assets_dept ON public.production_assets(project_id, department);
 
+ALTER TABLE public.production_assets ENABLE ROW LEVEL SECURITY;
+
 COMMENT ON TABLE public.production_assets IS 'Project-level asset registry. Each asset exists once and can be linked to multiple scenes.';
 
 -- Scene-asset junction: links assets to specific scenes
@@ -1424,6 +1473,8 @@ CREATE TABLE IF NOT EXISTS public.scene_breakdown_items (
 CREATE INDEX IF NOT EXISTS idx_breakdown_items_scene ON public.scene_breakdown_items(scene_data_id);
 CREATE INDEX IF NOT EXISTS idx_breakdown_items_asset ON public.scene_breakdown_items(asset_id);
 CREATE INDEX IF NOT EXISTS idx_breakdown_items_project ON public.scene_breakdown_items(project_id);
+
+ALTER TABLE public.scene_breakdown_items ENABLE ROW LEVEL SECURITY;
 
 COMMENT ON TABLE public.scene_breakdown_items IS 'Links production assets to specific scenes. An asset can appear in many scenes.';
 
@@ -1443,6 +1494,8 @@ CREATE TABLE IF NOT EXISTS public.shooting_day_settings (
   UNIQUE(project_id, shoot_date)
 );
 CREATE INDEX IF NOT EXISTS idx_shooting_day_settings_project ON public.shooting_day_settings(project_id);
+
+ALTER TABLE public.shooting_day_settings ENABLE ROW LEVEL SECURITY;
 
 COMMENT ON TABLE public.shooting_day_settings IS 'Per-date configuration: call times, wrap times, location, notes';
 
@@ -1623,6 +1676,9 @@ CREATE TABLE IF NOT EXISTS public.conversations (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
   title TEXT NOT NULL DEFAULT 'New conversation',
+  -- Studio phase the conversation belongs to ('develop' | 'write' | 'plan').
+  -- NULL on legacy rows is treated as 'develop' by clients.
+  phase TEXT CHECK (phase IN ('develop', 'write', 'plan')),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   is_archived BOOLEAN DEFAULT FALSE
@@ -1776,7 +1832,7 @@ CREATE TABLE IF NOT EXISTS public.image_usage_events (
   )),
   
   -- Service Used
-  service_provider TEXT NOT NULL CHECK (service_provider IN ('replicate', 'openai', 'stability_ai')),
+  service_provider TEXT NOT NULL CHECK (service_provider IN ('replicate', 'openai', 'stability_ai', 'openrouter')),
   model_used TEXT,
   
   -- Image Details
@@ -2241,6 +2297,74 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+-- Atomically create a script version snapshot.
+-- Uses an advisory transaction lock per script to prevent duplicate version_number
+-- when autosaves/AI/collaborators hit the same script at the same time.
+DROP FUNCTION IF EXISTS public.create_script_version_snapshot(UUID, UUID, TEXT);
+CREATE OR REPLACE FUNCTION public.create_script_version_snapshot(
+  p_script_id UUID,
+  p_user_id UUID DEFAULT NULL,
+  p_change_summary TEXT DEFAULT 'Auto-save',
+  p_skip_if_unchanged BOOLEAN DEFAULT FALSE
+)
+RETURNS INTEGER AS $$
+DECLARE
+  next_version INTEGER;
+  current_script RECORD;
+  latest_version_number INTEGER;
+  latest_content JSONB;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_script_id::text, 0));
+
+  SELECT title, content
+  INTO current_script
+  FROM public.scripts
+  WHERE id = p_script_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Script not found: %', p_script_id;
+  END IF;
+
+  SELECT version_number, content
+  INTO latest_version_number, latest_content
+  FROM public.script_versions
+  WHERE script_id = p_script_id
+  ORDER BY version_number DESC
+  LIMIT 1;
+
+  IF p_skip_if_unchanged
+    AND latest_version_number IS NOT NULL
+    AND latest_content IS NOT DISTINCT FROM current_script.content
+  THEN
+    RETURN latest_version_number;
+  END IF;
+
+  SELECT COALESCE(MAX(version_number), 0) + 1
+  INTO next_version
+  FROM public.script_versions
+  WHERE script_id = p_script_id;
+
+  INSERT INTO public.script_versions (
+    script_id,
+    version_number,
+    title,
+    content,
+    change_summary,
+    created_by
+  )
+  VALUES (
+    p_script_id,
+    next_version,
+    COALESCE(current_script.title, 'Script'),
+    current_script.content,
+    COALESCE(p_change_summary, 'Auto-save'),
+    p_user_id
+  );
+
+  RETURN next_version;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
 
 -- Update collaborator count when collaborators change
 CREATE OR REPLACE FUNCTION update_project_collaborator_count()
@@ -2455,70 +2579,68 @@ FOR EACH ROW EXECUTE FUNCTION set_episode_project_id();
 -- =====================================================
 
 -- Auto-create Season 1, Episode 1 for new film projects
-CREATE OR REPLACE FUNCTION create_default_episode_for_film()
+CREATE OR REPLACE FUNCTION public.create_default_episode_for_film()
 RETURNS TRIGGER AS $$
+DECLARE
+  v_season_id UUID;
+  v_episode_id UUID;
 BEGIN
   -- Only for film projects
   IF NEW.project_type = 'film' THEN
-    DECLARE
-      season_id UUID;
-      episode_id UUID;
-    BEGIN
-      -- Create default season (Season 1)
-      INSERT INTO public.seasons (
-        project_id,
-        season_number,
-        title,
-        status,
-        created_at
-      ) VALUES (
-        NEW.id,
-        1,
-        'Main',
-        'writing',
-        NOW()
-      ) RETURNING id INTO season_id;
+    -- Create default season (Season 1)
+    INSERT INTO public.seasons (
+      project_id,
+      season_number,
+      title,
+      status,
+      created_at
+    ) VALUES (
+      NEW.id,
+      1,
+      'Main',
+      'writing',
+      NOW()
+    ) RETURNING id INTO v_season_id;
 
-      -- Create default episode (Episode 1 = the film itself)
-      INSERT INTO public.episodes (
-        season_id,
-        project_id,
-        episode_number,
-        title,
-        runtime,
-        status,
-        created_at
-      ) VALUES (
-        season_id,
-        NEW.id,
-        1,
-        NEW.title,
-        NULL, -- Runtime can be set later
-        'draft',
-        NOW()
-      ) RETURNING id INTO episode_id;
+    -- Create default episode (Episode 1 = the film itself)
+    INSERT INTO public.episodes (
+      season_id,
+      project_id,
+      episode_number,
+      title,
+      runtime,
+      status,
+      created_at
+    ) VALUES (
+      v_season_id,
+      NEW.id,
+      1,
+      COALESCE(NEW.title, NEW.name),
+      NULL, -- Runtime can be set later
+      'draft',
+      NOW()
+    ) RETURNING id INTO v_episode_id;
 
-      -- If the project has an active_script_id, link it to the episode
-      IF NEW.active_script_id IS NOT NULL THEN
-        UPDATE public.scripts
-        SET episode_id = episode_id
-        WHERE id = NEW.active_script_id;
-      END IF;
+    -- If the project has an active_script_id, link it to the episode
+    IF NEW.active_script_id IS NOT NULL THEN
+      UPDATE public.scripts
+      SET episode_id = v_episode_id
+      WHERE id = NEW.active_script_id;
+    END IF;
 
-      RAISE NOTICE 'Created default season and episode for film project %', NEW.id;
-    END;
+    RAISE NOTICE 'Created default season and episode for film project %', NEW.id;
   END IF;
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SET search_path = public, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 
 -- Create trigger for new film projects
 DROP TRIGGER IF EXISTS trigger_create_default_episode ON public.projects;
 CREATE TRIGGER trigger_create_default_episode
   AFTER INSERT ON public.projects
   FOR EACH ROW
-  EXECUTE FUNCTION create_default_episode_for_film();
+  EXECUTE FUNCTION public.create_default_episode_for_film();
 
 -- Helper functions for episode statistics and budget aggregation
 
@@ -4137,6 +4259,8 @@ GRANT EXECUTE ON FUNCTION public.update_monthly_summary(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.update_monthly_summary(UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.get_next_script_version_number(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_next_script_version_number(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.create_script_version_snapshot(UUID, UUID, TEXT, BOOLEAN) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.create_script_version_snapshot(UUID, UUID, TEXT, BOOLEAN) TO service_role;
 
 -- Function to get document version count
 CREATE OR REPLACE FUNCTION get_document_version_count(document_uuid UUID)
@@ -4376,6 +4500,11 @@ INSERT INTO storage.buckets (id, name, public)
 VALUES ('project-assets', 'project-assets', false)
 ON CONFLICT (id) DO UPDATE SET public = false;
 
+-- Generated video bucket (PRIVATE) — AI-animated storyboard panel clips (MEGA beta)
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('generated-video', 'generated-video', false)
+ON CONFLICT (id) DO UPDATE SET public = false;
+
 -- =====================================================
 -- STORAGE POLICIES
 -- =====================================================
@@ -4507,6 +4636,31 @@ DROP POLICY IF EXISTS "Allow users to delete their project assets" ON storage.ob
 CREATE POLICY "Allow users to delete their project assets"
 ON storage.objects FOR DELETE
 USING (bucket_id = 'project-assets' AND auth.role() = 'authenticated');
+
+-- Storage policies for generated video (AI-animated panel clips, MEGA beta)
+DROP POLICY IF EXISTS "Allow authenticated users to upload generated video" ON storage.objects;
+CREATE POLICY "Allow authenticated users to upload generated video"
+ON storage.objects FOR INSERT
+WITH CHECK (
+  bucket_id = 'generated-video'
+  AND auth.role() = 'authenticated'
+);
+
+DROP POLICY IF EXISTS "Allow public access to generated video" ON storage.objects;
+DROP POLICY IF EXISTS "Allow authenticated read access to generated video" ON storage.objects;
+CREATE POLICY "Allow authenticated read access to generated video"
+ON storage.objects FOR SELECT
+USING (bucket_id = 'generated-video' AND auth.role() = 'authenticated');
+
+DROP POLICY IF EXISTS "Allow users to update their generated video" ON storage.objects;
+CREATE POLICY "Allow users to update their generated video"
+ON storage.objects FOR UPDATE
+USING (bucket_id = 'generated-video' AND auth.role() = 'authenticated');
+
+DROP POLICY IF EXISTS "Allow users to delete their generated video" ON storage.objects;
+CREATE POLICY "Allow users to delete their generated video"
+ON storage.objects FOR DELETE
+USING (bucket_id = 'generated-video' AND auth.role() = 'authenticated');
 
 -- =====================================================
 -- COMMENTS SYSTEM TABLES & FUNCTIONALITY
@@ -5071,6 +5225,7 @@ ALTER FUNCTION public.set_comment_resolved_timestamp() SECURITY DEFINER SET sear
 ALTER FUNCTION public.get_comment_stats(TEXT, TEXT, UUID) SECURITY DEFINER SET search_path = public, pg_temp;
 ALTER FUNCTION public.update_unarchive_updated_at() SECURITY DEFINER SET search_path = public, pg_temp;
 ALTER FUNCTION public.get_next_script_version_number(UUID) SECURITY DEFINER SET search_path = public, pg_temp;
+ALTER FUNCTION public.create_script_version_snapshot(UUID, UUID, TEXT, BOOLEAN) SECURITY DEFINER SET search_path = public, pg_temp;
 ALTER FUNCTION public.update_comments_updated_at() SECURITY DEFINER SET search_path = public, pg_temp;
 ALTER FUNCTION public.get_document_version_count(UUID) SECURITY DEFINER SET search_path = public, pg_temp;
 

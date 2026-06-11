@@ -20,13 +20,13 @@ Each major service area has its own detailed documentation. **Read the relevant 
 
 | Doc | Description |
 |-----|-------------|
-| [`SERVER_ARCHITECTURE.md`](./SERVER_ARCHITECTURE.md) | Server setup, middleware chain, authentication, rate limiting, deployment |
-| [`BILLING_SYSTEM.md`](./BILLING_SYSTEM.md) | Subscription lifecycle, Stripe integration, addons, webhook design |
-| [`AI_SERVICE.md`](./AI_SERVICE.md) | Model routing, token management, context optimization, image generation |
-| [`SCRIPT_SERVICE.md`](./SCRIPT_SERVICE.md) | TipTap editor, scene parsing, import/export, versioning, Script Doctor |
-| [`COLLABORATION_SERVICE.md`](./COLLABORATION_SERVICE.md) | WebSocket/Y.js real-time editing, presence, comments, roles |
-| [`PRODUCTION_SERVICE.md`](./PRODUCTION_SERVICE.md) | Scene breakdown, cast/crew, scheduling, call sheets, exports |
-| [`CORE_SERVICES.md`](./CORE_SERVICES.md) | Projects, characters, locations, storyboards, documents, episodes, beats, storage |
+| [`SERVER_ARCHITECTURE.md`](./docs/SERVER_ARCHITECTURE.md) | Server setup, middleware chain, authentication, rate limiting, deployment |
+| [`BILLING_SYSTEM.md`](./docs/BILLING_SYSTEM.md) | Subscription lifecycle, Stripe integration, addons, webhook design |
+| [`AI_SERVICE.md`](./docs/AI_SERVICE.md) | Model routing, token management, context optimization, image generation |
+| [`SCRIPT_SERVICE.md`](./docs/SCRIPT_SERVICE.md) | TipTap editor, scene parsing, import/export, versioning, Script Doctor |
+| [`COLLABORATION_SERVICE.md`](./docs/COLLABORATION_SERVICE.md) | WebSocket/Y.js real-time editing, presence, comments, roles |
+| [`PRODUCTION_SERVICE.md`](./docs/PRODUCTION_SERVICE.md) | Scene breakdown, cast/crew, scheduling, call sheets, exports |
+| [`CORE_SERVICES.md`](./docs/CORE_SERVICES.md) | Projects, characters, locations, storyboards, documents, episodes, beats, storage |
 
 > When updating a service, update the corresponding `.md` doc to keep it in sync.
 
@@ -34,7 +34,7 @@ Each major service area has its own detailed documentation. **Read the relevant 
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 24+
 - npm or yarn
 - Supabase account and project
 - OpenAI API key
@@ -115,16 +115,18 @@ plotwell-backend/
 │   │   ├── production.ts     # Production analysis prompts
 │   │   ├── scenes.ts         # Scene generation prompts
 │   │   └── storyboards.ts    # Storyboard generation prompts
-│   ├── routes/               # API route definitions (27 files + 2 directories)
-│   │   ├── ai/              # AI generation endpoints (8 files)
+│   ├── routes/               # API route definitions (29 files + 2 directories)
+│   │   ├── ai/              # AI generation endpoints (10 files)
 │   │   │   ├── index.ts     # AI router aggregator
+│   │   │   ├── agent.ts     # Autonomous screenplay generation via Agent Writer
 │   │   │   ├── beats.ts     # Beat sheet AI generation
 │   │   │   ├── characters.ts # Character AI extraction
 │   │   │   ├── chat.ts      # Conversational AI brainstorming
 │   │   │   ├── documents.ts # Document AI generation
 │   │   │   ├── locations.ts # Location AI extraction
 │   │   │   ├── scenes.ts   # Scene AI generation
-│   │   │   └── storyboards.ts # Storyboard AI generation
+│   │   │   ├── storyboards.ts # Storyboard AI generation
+│   │   │   └── taskEvents.ts # SSE endpoint for AI task status notifications
 │   │   ├── production/      # Production planning endpoints (8 files)
 │   │   │   ├── index.ts     # Production router aggregator
 │   │   │   ├── analysis.ts  # AI script analysis & budget
@@ -159,7 +161,9 @@ plotwell-backend/
 │   │   ├── unifiedBilling.ts # Unified billing operations
 │   │   ├── aiCredits.ts      # AI credit purchases & balance
 │   │   └── publicShare.ts    # Public project sharing (read-only links)
-│   ├── services/            # Business logic (37 files)
+│   ├── services/            # Business logic (39 files)
+│   │   ├── agentOrchestratorService.ts  # Agent Writer orchestration & plan generation
+│   │   ├── aiTaskEventService.ts    # Task event streaming service for SSE
 │   │   ├── aiTokenService.ts        # AI token management & context building
 │   │   ├── aiModelRouter.ts         # AI model selection & routing logic
 │   │   ├── aiRoutingLogger.ts       # AI routing decision logging
@@ -1383,8 +1387,8 @@ stripe trigger invoice.payment_failed
 **Complete Local Testing Flow:**
 ```bash
 # Terminal 1: Start backend server
-cd backend
-npm run dev
+cd plotwell-backend
+npm run dev:local
 
 # Terminal 2: Start Stripe webhook forwarding
 stripe listen --forward-to localhost:3001/api/stripe/webhook
@@ -1443,7 +1447,7 @@ Configured in `src/config/pricingPlans.ts`:
 ### AI Credits System (NEW)
 AI credits are **one-time purchases** that never expire:
 
-- **Purchase**: 100 AI credits for €5 (paid subscribers only)
+- **Purchase**: 200 credits for $5, 500 credits for $10, or 1400 credits for $20
 - **Image Generation**: 10 credits per image
 - **Video Generation**: 50 credits per video (future)
 - **Never Expire**: Credits persist across billing cycles
@@ -1485,14 +1489,11 @@ npm run dev:prod     # Start with .env.production (Render prod)
 npm run build        # Build TypeScript to JavaScript
 npm start           # Start production server
 
-# Database
-npm run setup:db    # Apply complete database schema
-npm run migrate     # Apply pending migrations
-
 # Utilities
-npm run test        # Run tests (if configured)
-npm run lint        # ESLint code checking
+npm run test        # Run Jest tests
 ```
+
+Database schema changes are applied from SQL files through Supabase or the project-specific migration workflow; this package does not currently expose npm database migration scripts.
 
 ### Development Server
 The development server runs on port `3001` with:
@@ -1697,8 +1698,8 @@ FRONTEND_URL=https://app.plotwell.co,https://plotwell.co
 # Check Supabase credentials
 node -e "console.log(process.env.SUPABASE_URL)"
 
-# Test database connection
-npm run test:db
+# Confirm the backend still type-checks
+npm run build
 ```
 
 #### AI API Issues
@@ -1759,6 +1760,6 @@ Recommended monitoring setup:
 ---
 
 **Backend Version**: 2.0.0
-**Node.js**: 18+
+**Node.js**: 24+
 **Database**: PostgreSQL (via Supabase)
 **Primary AI Models**: GPT-OSS-120B (via Replicate), Flux 1.1 Pro (images)

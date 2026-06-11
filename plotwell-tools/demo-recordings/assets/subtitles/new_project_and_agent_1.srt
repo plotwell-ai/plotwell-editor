@@ -1,0 +1,19 @@
+1
+00:00:00,000 --> 00:00:03,000
+Opening plotwell — the professional screenplay editor
+
+2
+00:00:03,000 --> 00:00:07,000
+Creating a new project
+
+3
+00:00:07,000 --> 00:00:12,000
+The AI Agent writes your first scene from a simple instruction
+
+4
+00:00:12,000 --> 00:00:18,000
+Reviewing the AI-generated plan before writing
+
+5
+00:00:18,000 --> 00:00:26,000
+Scene generated directly in the editor — ready to edit

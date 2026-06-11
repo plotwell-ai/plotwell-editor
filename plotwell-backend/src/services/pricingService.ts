@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import Stripe from 'stripe';
-import { PRICING_PLANS, PricingPlan, UsageStats, checkLimit, getRemainingLimit, getPlanById, AI_CREDITS_CONFIG, currentPriceIds } from '../config/pricingPlans';
+import { PRICING_PLANS, PricingPlan, UsageStats, checkLimit, getRemainingLimit, getPlanById, AI_CREDITS_CONFIG, currentPriceIds, getEffectiveCost, EXPANSION_PRICING } from '../config/pricingPlans';
 // Note: MonthlyBillingService has been removed - replaced with unified billing system
 // Note: Image credits have been replaced with AI credits (one-time purchases)
 
@@ -20,20 +20,14 @@ export class PricingService {
   }
 
   /**
-   * Check if user has active paid plan
-   * This is the single source of truth for paid plan access
+   * Check if user has active paid plan.
+   * Delegates to canonical helpers.
    */
   async hasPaidPlan(userId: string): Promise<boolean> {
     try {
-      const { data: subscription } = await this.supabase
-        .from('user_subscriptions')
-        .select('plan_id, status')
-        .eq('user_id', userId)
-        .single();
-
-      return subscription &&
-        subscription.plan_id === 'paid' &&
-        ['active', 'trialing'].includes(subscription.status || '');
+      const { getSubscriptionRecord, isPaidSubscription } = require('../utils/subscriptionHelpers');
+      const sub = await getSubscriptionRecord(this.supabase, userId);
+      return isPaidSubscription(sub);
     } catch (error) {
       console.error('Error checking paid plan:', error);
       return false;
@@ -44,18 +38,14 @@ export class PricingService {
    * Get user's current subscription and usage directly from tables
    */
   async getUserSubscription(userId: string) {
+    const { getSubscriptionRecord } = require('../utils/subscriptionHelpers');
+
     try {
       // Check if we need to sync with Stripe (only if past billing period end)
-      // This is a backup to webhooks - ensures AI generations reset even if webhook fails
       await this.checkAndSyncStripeSubscription(userId);
 
-      // Fetch subscription data directly from tables (including addon columns and cancellation flag)
-      const { data: subscriptionData } = await this.supabase
-        .from('user_subscriptions')
-        .select('plan_id, status, additional_projects, additional_collaborators, cancel_at_period_end, current_period_end, plan_price, plan_currency')
-        .eq('user_id', userId)
-        .eq('status', 'active')
-        .single();
+      // Canonical subscription query
+      const subscriptionData = await getSubscriptionRecord(this.supabase, userId);
 
       // Fetch quota data - ai_credits_balance is the unified credit balance (one-time purchases)
       const { data: quotaData } = await this.supabase
@@ -124,73 +114,84 @@ export class PricingService {
       const planId = subscriptionData?.plan_id || 'free';
       const plan = getPlanById(planId);
 
-      // Detect billing cycle from Stripe subscription
-      let billingCycle: 'monthly' | 'yearly' = 'monthly';
-      if (planId !== 'free') {
-        try {
-          const { data: userData } = await this.supabase
-            .from('users')
-            .select('stripe_subscription_id')
-            .eq('id', userId)
-            .single();
+      // Check if user ever had a paid subscription (not just a Stripe customer)
+      // stripe_customer_id is created at checkout session time, before payment completes
+      const { data: userStripeData } = await this.supabase
+        .from('users')
+        .select('stripe_customer_id, stripe_subscription_id')
+        .eq('id', userId)
+        .single();
 
-          if (userData?.stripe_subscription_id) {
-            const subscription = await stripe.subscriptions.retrieve(userData.stripe_subscription_id, {
-              expand: ['items.data.price']
-            });
-            const basePriceItem = subscription.items.data.find((item: any) => {
-              const priceId = item.price.id;
-              return priceId === currentPriceIds.paid_monthly || priceId === currentPriceIds.paid_yearly;
-            });
-            if (basePriceItem?.price.recurring?.interval === 'year') {
-              billingCycle = 'yearly';
-            }
-          }
+      // Check if user_subscriptions record shows a past paid subscription
+      let hadPreviousSubscription = false;
+      if (subscriptionData?.status === 'cancelled') {
+        hadPreviousSubscription = true;
+      } else if (userStripeData?.stripe_customer_id) {
+        // Check Stripe for any past subscriptions (covers edge cases)
+        try {
+          const allSubs = await stripe.subscriptions.list({
+            customer: userStripeData.stripe_customer_id,
+            limit: 1,
+            status: 'all'
+          });
+          hadPreviousSubscription = allSubs.data.length > 0;
         } catch (err) {
-          // Fallback to monthly if detection fails
-          console.error('⚠️ Error detecting billing cycle:', err);
+          // If Stripe check fails, fall back to DB status
         }
       }
 
-      // Build available addons array with billing-cycle-aware pricing
-      const addons = [];
-      if (plan && plan.addons) {
-        // Projects addon
-        if (plan.addons.additionalProjects?.enabled) {
-          addons.push({
-            type: 'additional_projects',
-            name: 'Additional Projects',
-            description: 'Add more active projects to your subscription',
-            price_per_unit: billingCycle === 'yearly'
-              ? plan.addons.additionalProjects.yearlyPricePerProject
-              : plan.addons.additionalProjects.pricePerProject,
-            price_per_unit_monthly: plan.addons.additionalProjects.pricePerProject,
-            price_per_unit_yearly: plan.addons.additionalProjects.yearlyPricePerProject,
-            currency: plan.addons.additionalProjects.currency,
-            max_additional: plan.addons.additionalProjects.maxAdditional || -1,
-            current_quantity: subscriptionData?.additional_projects || 0
+      // Detect billing cycle from Stripe subscription (applies to all users — free users can have addon subs)
+      let billingCycle: 'monthly' | 'yearly' = 'monthly';
+      try {
+        if (userStripeData?.stripe_subscription_id) {
+          const stripeSub = await stripe.subscriptions.retrieve(userStripeData.stripe_subscription_id, {
+            expand: ['items.data.price']
           });
+          const hasYearlyItem = stripeSub.items.data.some((item: any) =>
+            item.price.recurring?.interval === 'year'
+          );
+          if (hasYearlyItem) billingCycle = 'yearly';
         }
+      } catch (err) {
+        console.error('⚠️ Error detecting billing cycle:', err);
+      }
 
-        // Collaborators addon
-        if (plan.addons.additionalCollaborators?.enabled) {
-          addons.push({
-            type: 'additional_collaborators',
-            name: 'Additional Collaborators',
-            description: 'Add more team members to your projects',
-            price_per_unit: billingCycle === 'yearly'
-              ? plan.addons.additionalCollaborators.yearlyPricePerCollaborator
-              : plan.addons.additionalCollaborators.pricePerCollaborator,
-            price_per_unit_monthly: plan.addons.additionalCollaborators.pricePerCollaborator,
-            price_per_unit_yearly: plan.addons.additionalCollaborators.yearlyPricePerCollaborator,
-            currency: plan.addons.additionalCollaborators.currency,
-            max_additional: plan.addons.additionalCollaborators.maxAdditional || -1,
-            current_quantity: subscriptionData?.additional_collaborators || 0
-          });
+      // Build available addons — available to all users (expansion model)
+      const ep = EXPANSION_PRICING;
+      const addons = [
+        {
+          type: 'additional_projects',
+          name: 'Additional Projects',
+          description: 'Add more active projects',
+          price_per_unit: billingCycle === 'yearly'
+            ? ep.additionalProjects.yearlyPricePerProject
+            : ep.additionalProjects.pricePerProject,
+          price_per_unit_monthly: ep.additionalProjects.pricePerProject,
+          price_per_unit_yearly: ep.additionalProjects.yearlyPricePerProject,
+          currency: ep.additionalProjects.currency,
+          max_additional: ep.additionalProjects.maxAdditional,
+          current_quantity: subscriptionData?.additional_projects || 0
+        },
+        {
+          type: 'additional_collaborators',
+          name: 'Additional Collaborators',
+          description: 'Add more team members to your projects',
+          price_per_unit: billingCycle === 'yearly'
+            ? ep.additionalCollaborators.yearlyPricePerCollaborator
+            : ep.additionalCollaborators.pricePerCollaborator,
+          price_per_unit_monthly: ep.additionalCollaborators.pricePerCollaborator,
+          price_per_unit_yearly: ep.additionalCollaborators.yearlyPricePerCollaborator,
+          currency: ep.additionalCollaborators.currency,
+          max_additional: ep.additionalCollaborators.maxAdditional,
+          current_quantity: subscriptionData?.additional_collaborators || 0
         }
+      ];
+      // Note: AI credits are one-time purchases via /api/ai-credits/purchase, not listed here
 
-        // Note: AI credits are now one-time purchases via /api/ai-credits/purchase
-        // They are not subscription addons, so not included in addons array
+      // Ensure free users have their 5-credit pool initialized
+      let aiCreditsBalance = quotaData?.ai_credits_balance || 0;
+      if (planId === 'free' && aiCreditsBalance === 0) {
+        aiCreditsBalance = await this.ensureFreeUserCredits(userId);
       }
 
       return {
@@ -198,8 +199,8 @@ export class PricingService {
         plan_id: planId,
         subscription_status: subscriptionData?.status || 'active',
         ai_generations_used: quotaData?.ai_generations_used || 0,
-        // AI credits - one-time purchases, never expire
-        ai_credits_balance: quotaData?.ai_credits_balance || 0,
+        // AI credits — free users: 5 lifetime pool; paid users: purchased credits
+        ai_credits_balance: aiCreditsBalance,
         ai_credits_purchased_total: quotaData?.ai_credits_purchased_total || 0,
         storage_used_gb: quotaData?.storage_used_gb || 0,
         projects_count: projectsData?.length || 0,
@@ -209,12 +210,14 @@ export class PricingService {
         documents_count: documentCount,
         additional_projects: subscriptionData?.additional_projects || 0,
         additional_collaborators: subscriptionData?.additional_collaborators || 0,
+        stripe_subscription_id: subscriptionData?.stripe_subscription_id || null,
         billing_cycle: billingCycle,
         cancel_at_period_end: subscriptionData?.cancel_at_period_end || false,
         current_period_end: subscriptionData?.current_period_end || null,
         plan_price: subscriptionData?.plan_price || null,
-        plan_currency: subscriptionData?.plan_currency || 'eur',
-        available_addons: addons
+        plan_currency: subscriptionData?.plan_currency || 'usd',
+        available_addons: addons,
+        had_previous_subscription: hadPreviousSubscription
       };
     } catch (error) {
       console.error('Error fetching user subscription:', error);
@@ -234,10 +237,11 @@ export class PricingService {
         documents_count: 0,
         additional_projects: 0,
         additional_collaborators: 0,
+        stripe_subscription_id: null,
         cancel_at_period_end: false,
         current_period_end: null,
         plan_price: null,
-        plan_currency: 'eur',
+        plan_currency: 'usd',
         available_addons: []
       };
     }
@@ -255,20 +259,15 @@ export class PricingService {
    * Note: AI credits are no longer part of subscription limits - they are one-time purchases
    */
   getEffectiveLimits(plan: PricingPlan, additionalProjects: number = 0, additionalCollaborators: number = 0) {
-    // Calculate total collaborators (base + additional)
-    const totalCollaborators = plan.limits.collaborators + additionalCollaborators;
-
     return {
       projects: plan.limits.projects === -1 ? -1 : plan.limits.projects + additionalProjects,
-      collaborators: totalCollaborators,
-      aiCreativeTasks: plan.limits.aiCreativeTasks,
-      // Note: AI credits are tracked separately in user_quotas.ai_credits_balance
-      // Use getAICreditsBalance() to check available credits
+      collaborators: plan.limits.collaborators + additionalCollaborators,
       documents: plan.limits.documents,
-      prioritySupport: plan.limits.prioritySupport,
-      storyboards: plan.limits.storyboards,
-      versionControl: plan.limits.versionControl,
-      comments: plan.limits.comments
+      storyboardPanels: plan.limits.storyboardPanels,
+      characters: plan.limits.characters,
+      locations: plan.limits.locations,
+      scriptVersions: plan.limits.scriptVersions,
+      // AI credits are tracked separately in user_quotas.ai_credits_balance
     };
   }
 
@@ -291,32 +290,8 @@ export class PricingService {
       subscription.additional_collaborators || 0
     );
 
-    // CRITICAL: If subscription is being cancelled, restrict to FREE plan limits
-    // Free plan allows 1 project and 1 collaborator
-    if (subscription.cancel_at_period_end && (action === 'create_project' || action === 'add_collaborator')) {
-
-      const FREE_PLAN_LIMITS = { projects: 1, collaborators: 1 };
-
-      const currentUsage = action === 'create_project'
-        ? subscription.projects_count || 0
-        : subscription.collaborators_count || 0;
-
-      const freeLimit = action === 'create_project'
-        ? FREE_PLAN_LIMITS.projects
-        : FREE_PLAN_LIMITS.collaborators;
-
-      // If user already has >= FREE plan limit, block creation
-      // This allows cancelled paid users to still use their 1 free project/collaborator
-      if (currentUsage >= freeLimit) {
-        return {
-          allowed: false,
-          reason: 'Your subscription is set to cancel. You cannot create additional projects or add more collaborators. Reactivate your subscription to continue.'
-        };
-      }
-
-      // If currentUsage < freeLimit, allow them to create up to the free limit
-      // This ensures cancelled paid users can still access free tier functionality
-    }
+    // Users keep full paid plan limits until the billing period ends,
+    // even if cancel_at_period_end is true
 
     const usage: UsageStats = {
       projectCount: subscription.projects_count || 0,
@@ -346,31 +321,30 @@ export class PricingService {
             remaining: remainingProjects
           };
         } catch (error) {
-          console.error('🔍 PROJECT CREATION DEBUG - Error with basic limit check, falling back to old logic:', error);
-          
-          // Fallback to old logic if monthly billing fails
+          console.error('🔍 PROJECT CREATION DEBUG - Error with basic limit check, falling back:', error);
+
           const projectLimit = effectiveLimits.projects;
           const canCreateProject = projectLimit === -1 || usage.projectCount < projectLimit;
           const projectsRemaining = projectLimit === -1 ? -1 : Math.max(0, projectLimit - usage.projectCount);
-          
+
           return {
             allowed: canCreateProject,
-            reason: canCreateProject ? undefined : `You've reached your project limit of ${projectLimit}. ${plan.addons?.additionalProjects?.enabled ? 'Purchase additional projects or upgrade your plan.' : 'Upgrade to create more projects.'}`,
+            reason: canCreateProject ? undefined : `You've reached your project limit of ${projectLimit}. Add more projects from $3/month.`,
             remaining: projectsRemaining
           };
         }
 
-      case 'ai_generation':
-        // NEW SYSTEM: Free users have lifetime quota (20 total), paid users use credits
-        const canGenerate = checkLimit(plan, usage, 'aiCreativeTasks');
-        const isFreeUser = subscription.plan_id === 'free';
+      case 'ai_generation': {
+        // All users use the unified credit system — seed trial credits for new users first
+        const balance = await this.ensureFreeUserCredits(userId);
+        const cost = getEffectiveCost('creative');
+        const canGenerate = cost === 0 || balance >= cost;
         return {
           allowed: canGenerate,
-          reason: canGenerate ? undefined : isFreeUser
-            ? `You've used all ${plan.limits.aiCreativeTasks} of your free AI Creative Tasks. Upgrade to Pro to continue.`
-            : `AI Creative Task requires credits. Purchase more credits to continue.`,
-          remaining: getRemainingLimit(plan, usage, 'aiCreativeTasks')
+          reason: canGenerate ? undefined : `AI tasks require ${cost} credit(s). Your balance: ${balance}. Purchase more credits to continue.`,
+          remaining: Math.floor(balance / Math.max(cost, 1))
         };
+      }
 
       case 'add_collaborator':
         const collaboratorLimit = effectiveLimits.collaborators;
@@ -378,7 +352,7 @@ export class PricingService {
         const collaboratorsRemaining = Math.max(0, collaboratorLimit - usage.collaboratorCount);
         return {
           allowed: canAddCollaborator,
-          reason: canAddCollaborator ? undefined : `You've reached your collaborator limit of ${collaboratorLimit}. ${plan.addons?.additionalCollaborators?.enabled ? 'Purchase additional collaborator slots or upgrade your plan.' : 'Upgrade to add more team members.'}`,
+          reason: canAddCollaborator ? undefined : `You've reached your collaborator limit of ${collaboratorLimit}. Add more collaborators from $3/month.`,
           remaining: collaboratorsRemaining
         };
 
@@ -444,6 +418,49 @@ export class PricingService {
       .eq('user_id', userId)
       .single();
     return data?.ai_credits_balance || 0;
+  }
+
+  /**
+   * Ensure free users have their AI credits initialized.
+   * Free users get 10 trial credits on first use (aiTrialCredits in pricingPlans.ts).
+   * This is a one-time lazy initialization — once credits are set, subsequent calls are no-ops.
+   * Returns the current balance after ensuring initialization.
+   */
+  async ensureFreeUserCredits(userId: string): Promise<number> {
+    const FREE_AI_LIMIT = PRICING_PLANS.free.limits.aiTrialCredits; // 10
+
+    const { data: quota } = await this.supabase
+      .from('user_quotas')
+      .select('ai_credits_balance, ai_generations_used')
+      .eq('user_id', userId)
+      .single();
+
+    const currentBalance = quota?.ai_credits_balance || 0;
+    const alreadyUsed = quota?.ai_generations_used || 0;
+
+    // If the user already has credits OR has a usage history, don't override.
+    // A balance of 0 with usage > 0 means they've legitimately spent their credits.
+    if (currentBalance > 0 || alreadyUsed > 0) return currentBalance;
+
+    // Truly new user — grant the initial free credit pool
+    const initialCredits = Math.max(0, FREE_AI_LIMIT - alreadyUsed);
+
+    if (initialCredits > 0) {
+      // Use upsert so it works whether or not the user_quotas row exists yet
+      const { error } = await this.supabase
+        .from('user_quotas')
+        .upsert(
+          { user_id: userId, ai_credits_balance: initialCredits },
+          { onConflict: 'user_id', ignoreDuplicates: false }
+        );
+      if (error) {
+        console.error(`❌ Free user ${userId}: failed to initialize AI credits:`, error);
+      } else {
+        if (DEBUG_AI) console.log(`✅ Free user ${userId}: initialized ${initialCredits} AI credits (${alreadyUsed} tasks already used)`);
+      }
+    }
+
+    return initialCredits;
   }
 
   /**
@@ -652,11 +669,11 @@ export class PricingService {
       new_plan: newPlanId,
       stripe_subscription_id: stripeSubscriptionId,
       addon_adjustments: addonAdjustments,
-      credits_applied: addonAdjustments.totalCreditsEuros > 0
+      credits_applied: addonAdjustments.totalCreditsDollars > 0
     });
 
     // If there are credits to apply, create a credit transaction
-    if (addonAdjustments.totalCreditsEuros > 0) {
+    if (addonAdjustments.totalCreditsDollars > 0) {
       await this.createCreditTransaction(userId, addonAdjustments);
     }
   }
@@ -670,8 +687,8 @@ export class PricingService {
 
     let newAdditionalProjects = currentAdditionalProjects;
     let newAdditionalCollaborators = currentAdditionalCollaborators;
-    let projectCreditsEuros = 0;
-    let collaboratorCreditsEuros = 0;
+    let projectCreditsDollars = 0;
+    let collaboratorCreditsDollars = 0;
 
     const currentUsage = {
       projects: currentSubscription.projects_count || 0,
@@ -694,14 +711,14 @@ export class PricingService {
 
           if (newBaseLimit >= currentEffectiveLimit) {
             // New plan covers all current projects, credit back all additional projects
-            projectCreditsEuros = currentAdditionalProjects * (currentPlan.addons?.additionalProjects?.pricePerProject || 5);
+            projectCreditsDollars = currentAdditionalProjects * (currentPlan.addons?.additionalProjects?.pricePerProject || 5);
             newAdditionalProjects = 0;
           } else if (newBaseLimit > currentPlan.limits.projects) {
             // New plan covers some additional projects, credit back the covered ones
             const coveredAdditionalProjects = newBaseLimit - currentPlan.limits.projects;
             const remainingAdditionalProjects = currentAdditionalProjects - coveredAdditionalProjects;
             
-            projectCreditsEuros = coveredAdditionalProjects * (currentPlan.addons?.additionalProjects?.pricePerProject || 5);
+            projectCreditsDollars = coveredAdditionalProjects * (currentPlan.addons?.additionalProjects?.pricePerProject || 5);
             newAdditionalProjects = Math.max(0, remainingAdditionalProjects);
           }
         }
@@ -709,7 +726,7 @@ export class PricingService {
     } else {
       // New plan has unlimited projects, credit back all additional projects
       if (currentAdditionalProjects > 0) {
-        projectCreditsEuros = currentAdditionalProjects * (currentPlan.addons?.additionalProjects?.pricePerProject || 5);
+        projectCreditsDollars = currentAdditionalProjects * (currentPlan.addons?.additionalProjects?.pricePerProject || 5);
         newAdditionalProjects = 0;
       }
     }
@@ -730,14 +747,14 @@ export class PricingService {
 
           if (newBaseLimit >= currentEffectiveLimit) {
             // New plan covers all current collaborators, credit back all additional collaborators
-            collaboratorCreditsEuros = currentAdditionalCollaborators * (currentPlan.addons?.additionalCollaborators?.pricePerCollaborator || 10);
+            collaboratorCreditsDollars = currentAdditionalCollaborators * (currentPlan.addons?.additionalCollaborators?.pricePerCollaborator || 10);
             newAdditionalCollaborators = 0;
           } else if (newBaseLimit > currentPlan.limits.collaborators) {
             // New plan covers some additional collaborators, credit back the covered ones
             const coveredAdditionalCollaborators = newBaseLimit - currentPlan.limits.collaborators;
             const remainingAdditionalCollaborators = currentAdditionalCollaborators - coveredAdditionalCollaborators;
             
-            collaboratorCreditsEuros = coveredAdditionalCollaborators * (currentPlan.addons?.additionalCollaborators?.pricePerCollaborator || 10);
+            collaboratorCreditsDollars = coveredAdditionalCollaborators * (currentPlan.addons?.additionalCollaborators?.pricePerCollaborator || 10);
             newAdditionalCollaborators = Math.max(0, remainingAdditionalCollaborators);
           }
         }
@@ -745,7 +762,7 @@ export class PricingService {
     } else {
       // New plan has unlimited collaborators, credit back all additional collaborators
       if (currentAdditionalCollaborators > 0) {
-        collaboratorCreditsEuros = currentAdditionalCollaborators * (currentPlan.addons?.additionalCollaborators?.pricePerCollaborator || 10);
+        collaboratorCreditsDollars = currentAdditionalCollaborators * (currentPlan.addons?.additionalCollaborators?.pricePerCollaborator || 10);
         newAdditionalCollaborators = 0;
       }
     }
@@ -753,19 +770,19 @@ export class PricingService {
     return {
       newAdditionalProjects,
       newAdditionalCollaborators,
-      projectCreditsEuros,
-      collaboratorCreditsEuros,
-      totalCreditsEuros: projectCreditsEuros + collaboratorCreditsEuros,
+      projectCreditsDollars,
+      collaboratorCreditsDollars,
+      totalCreditsDollars: projectCreditsDollars + collaboratorCreditsDollars,
       details: {
         projects: {
           before: currentAdditionalProjects,
           after: newAdditionalProjects,
-          creditEuros: projectCreditsEuros
+          creditDollars: projectCreditsDollars
         },
         collaborators: {
           before: currentAdditionalCollaborators,
           after: newAdditionalCollaborators,
-          creditEuros: collaboratorCreditsEuros
+          creditDollars: collaboratorCreditsDollars
         }
       }
     };
@@ -781,14 +798,14 @@ export class PricingService {
         user_id: userId,
         addon_type: 'upgrade_credit',
         quantity: -1, // Negative quantity indicates credit
-        unit_price_cents: Math.round(addonAdjustments.totalCreditsEuros * 100),
-        total_price_cents: Math.round(addonAdjustments.totalCreditsEuros * 100),
-        currency: 'EUR',
+        unit_price_cents: Math.round(addonAdjustments.totalCreditsDollars * 100),
+        total_price_cents: Math.round(addonAdjustments.totalCreditsDollars * 100),
+        currency: 'USD',
         status: 'completed',
         metadata: {
           reason: 'Plan upgrade add-on credit',
-          project_credits: addonAdjustments.projectCreditsEuros,
-          collaborator_credits: addonAdjustments.collaboratorCreditsEuros,
+          project_credits: addonAdjustments.projectCreditsDollars,
+          collaborator_credits: addonAdjustments.collaboratorCreditsDollars,
           details: addonAdjustments.details
         }
       });
@@ -893,8 +910,12 @@ export class PricingService {
         plan: plan,
         usage: {
           projects: currentUsage.projects_count,
-          aiCreativeTasks: currentUsage.ai_generations_used,
-          // AI credits are tracked separately
+          // aiCreativeTasks now reflects credits consumed (unified system)
+          // For free users: tasks used = FREE_LIMIT - credits_remaining
+          // For paid users: this field is legacy; use ai_credits_balance for remaining
+          aiCreativeTasks: currentUsage.plan_id === 'free'
+            ? Math.max(0, PRICING_PLANS.free.limits.aiCreativeTasks - (currentUsage.ai_credits_balance || 0))
+            : (currentUsage.ai_generations_used || 0),
           aiCreditsBalance: currentUsage.ai_credits_balance || 0,
           collaborators: currentUsage.collaborators_count
         },
@@ -981,7 +1002,7 @@ export class PricingService {
       // Fast local downgrade: if cancel_at_period_end is true and period has expired,
       // downgrade immediately without waiting for Stripe webhook or API call
       if (subscription.cancel_at_period_end && periodEnd && now > periodEnd) {
-        console.log(`⚠️ Subscription expired for user ${userId} (cancel_at_period_end=true, period ended ${periodEnd.toISOString()}) - downgrading to free`);
+        if (DEBUG_AI) console.log(`⚠️ Subscription expired for user ${userId} (cancel_at_period_end=true, period ended ${periodEnd.toISOString()}) - downgrading to free`);
         await this.supabase
           .from('user_subscriptions')
           .update({

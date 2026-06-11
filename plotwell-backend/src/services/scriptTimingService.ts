@@ -1,4 +1,5 @@
 import { ScriptParsingService } from './scriptParsingService';
+import { ensureProsemirrorFormat } from '../utils/formatDetection';
 
 export interface TimingBreakdown {
   totalPages: number;
@@ -47,13 +48,16 @@ export class ScriptTimingService {
   };
 
   /**
-   * Calculate timing for a script from TipTap JSON content
+   * Calculate timing for a script from ProseMirror JSON content
    */
   static calculateScriptTiming(scriptContent: any): TimingBreakdown {
-    
+
     if (!scriptContent || !scriptContent.content || !Array.isArray(scriptContent.content)) {
       return this.getEmptyTiming();
     }
+
+    // Ensure content is in ProseMirror format
+    scriptContent = ensureProsemirrorFormat(scriptContent);
 
     const scenes: SceneTimingInfo[] = [];
     let currentScene: Partial<SceneTimingInfo> | null = null;
@@ -67,20 +71,28 @@ export class ScriptTimingService {
       parentheticals: 0
     };
 
+    const validNodeTypes = new Set([
+      'sceneHeading', 'action', 'character', 'dialogue',
+      'parenthetical', 'transition', 'centered'
+    ]);
+
     for (const node of scriptContent.content) {
-      if (node.type !== 'paragraph' || !node.content) continue;
+      if (!node.content) continue;
+
+      // Skip nodes that aren't valid screenplay types
+      if (!validNodeTypes.has(node.type) && node.type !== 'paragraph') continue;
 
       const text = node.content
         .filter((content: any) => content.type === 'text')
         .map((content: any) => content.text)
         .join('');
 
-      const className = node.attrs?.class || '';
+      const nodeType = node.type;
       const wordCount = this.countWords(text);
 
       // Scene heading detection
-      if (className === 'scene-heading' || this.isSceneHeading(text)) {
-        
+      if (nodeType === 'sceneHeading' || this.isSceneHeading(text)) {
+
         // Save previous scene if exists
         if (currentScene && currentScene.heading) {
           const completedScene = this.completeSceneTiming(currentScene, sceneNumber - 1);
@@ -101,38 +113,37 @@ export class ScriptTimingService {
 
         elementCounts.sceneHeadings++;
       }
-      
+
       // Process other elements
       else if (currentScene) {
-        switch (className) {
+        switch (nodeType) {
           case 'action':
-          case 'shot-description':
             currentScene.elements!.action += wordCount;
             currentScene.wordCount = (currentScene.wordCount || 0) + wordCount;
             elementCounts.action++;
             break;
-            
+
           case 'dialogue':
             currentScene.elements!.dialogue += wordCount;
             currentScene.wordCount = (currentScene.wordCount || 0) + wordCount;
             elementCounts.dialogue++;
             break;
-            
+
           case 'parenthetical':
             currentScene.elements!.parentheticals += wordCount;
             currentScene.wordCount = (currentScene.wordCount || 0) + wordCount;
             elementCounts.parentheticals++;
             break;
-            
+
           case 'transition':
-          case 'aligned':
+          case 'centered':
             elementCounts.transitions++;
             break;
-            
-          case 'character-name':
+
+          case 'character':
             // Character names don't add significant timing but count for structure
             break;
-            
+
           default:
             // Treat unknown elements as action
             if (text.trim()) {
@@ -144,14 +155,13 @@ export class ScriptTimingService {
             }
         }
       }
-      
+
       // Handle content without a current scene (no scene headings detected yet)
       else if (text.trim()) {
 
         // Count elements even without scenes
-        switch (className) {
+        switch (nodeType) {
           case 'action':
-          case 'shot-description':
             elementCounts.action++;
             break;
           case 'dialogue':
@@ -160,7 +170,7 @@ export class ScriptTimingService {
           case 'parenthetical':
             elementCounts.parentheticals++;
             break;
-          case 'character-name':
+          case 'character':
             // Don't count character names as elements
             break;
           default:

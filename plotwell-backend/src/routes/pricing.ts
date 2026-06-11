@@ -186,7 +186,7 @@ router.post('/upgrade/preview', requireAuth, extractUserId, async (req: PricingR
     const addonAdjustments = pricingService.calculateUpgradeDowngradeAdjustments(currentPlan, newPlan, currentSubscription);
     
     const priceDifference = newPlan.price - currentPlan.price;
-    const netCost = priceDifference - addonAdjustments.totalCreditsEuros;
+    const netCost = priceDifference - addonAdjustments.totalCreditsDollars;
     
     res.json({
       success: true,
@@ -203,11 +203,11 @@ router.post('/upgrade/preview', requireAuth, extractUserId, async (req: PricingR
         },
         pricing: {
           base_price_difference: priceDifference,
-          addon_credits: addonAdjustments.totalCreditsEuros,
+          addon_credits: addonAdjustments.totalCreditsDollars,
           net_monthly_cost_change: netCost
         },
         addon_adjustments: addonAdjustments,
-        has_credits: addonAdjustments.totalCreditsEuros > 0
+        has_credits: addonAdjustments.totalCreditsDollars > 0
       }
     });
   } catch (error) {
@@ -268,8 +268,8 @@ router.post('/upgrade', requireAuth, extractUserId, async (req: PricingRequest, 
     await pricingService.upgradeSubscription(userId, planId, subscriptionId);
     
     let message = `Successfully upgraded to ${plan.name} plan`;
-    if (addonAdjustments && addonAdjustments.totalCreditsEuros > 0) {
-      message += `. €${addonAdjustments.totalCreditsEuros} credit applied for unused add-ons`;
+    if (addonAdjustments && addonAdjustments.totalCreditsDollars > 0) {
+      message += `. $${addonAdjustments.totalCreditsDollars} credit applied for unused add-ons`;
     }
     
     res.json({ 
@@ -278,7 +278,7 @@ router.post('/upgrade', requireAuth, extractUserId, async (req: PricingRequest, 
       plan: plan,
       dev_mode: isDev,
       subscription_id: subscriptionId,
-      credits_applied: addonAdjustments ? addonAdjustments.totalCreditsEuros : 0,
+      credits_applied: addonAdjustments ? addonAdjustments.totalCreditsDollars : 0,
       addon_adjustments: addonAdjustments
     });
   } catch (error) {
@@ -405,7 +405,7 @@ router.get('/billing/history', requireAuth, extractUserId, async (req: PricingRe
           .map((item: any) => {
             const itemAmount = Math.abs(item.amount);
             const sign = item.amount < 0 ? 'Credit' : 'Charge';
-            return `${item.description || 'Subscription'} (${sign}: €${(itemAmount / 100).toFixed(2)})`;
+            return `${item.description || 'Subscription'} (${sign}: $${(itemAmount / 100).toFixed(2)})`;
           });
         description = descriptions.join(', ') || (isRefund ? 'Refund/Credit' : 'Subscription charge');
       } else {

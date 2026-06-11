@@ -1,7 +1,10 @@
-import { Router } from "express";
+import { Router, Request, Response } from "express";
 import { createClient } from "@supabase/supabase-js";
 import { extractUserId, checkProjectLimit, addPricingService, PricingRequest } from "../middleware/pricingMiddleware";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, checkProjectAccess } from "../middleware/auth";
+import { buildProjectGraph } from "../services/projectGraphService";
+import { isEpisodic, defaultVideoFormat } from "../utils/projectType";
+import { resolveVisualStyleId } from "../prompts";
 // Note: AddonBillingService has been removed - replaced with unified billing system
 
 const DEBUG_AI = process.env.DEBUG_AI === 'true';
@@ -90,28 +93,13 @@ router.get("/", requireAuth, extractUserId, async (req: PricingRequest, res) => 
 });
 
 router.post("/", requireAuth, extractUserId, addPricingService, checkProjectLimit, async (req: PricingRequest, res) => {
-  const { name, description, project_type = 'film', status = 'active', content_language = 'en', video_format = '16:9', settings, title, author, based_on, contact_info, copyright_notice, registration_number, initial_content } = req.body;
+  const { name, description, project_type = 'film', status = 'active', content_language = 'en', video_format, visual_style, settings, title, author, based_on, contact_info, copyright_notice, registration_number, initial_content } = req.body;
   const user_id = req.userId; // Extracted from JWT token
 
-  // Check if user is trying to create a series project on free plan
-  if (project_type === 'series') {
-    try {
-      const pricingService = req.pricingService!;
-      const userSubscription = await pricingService.getUserSubscription(user_id);
-
-      if (userSubscription.plan_id === 'free') {
-        return res.status(403).json({
-          error: 'feature_not_available',
-          error_type: 'series_requires_pro',
-          message: 'TV Series projects (with seasons and episodes) are only available on the Pro plan.',
-          redirect_to: '/projects?view=plans'
-        });
-      }
-    } catch (subError) {
-      console.error('❌ Error checking subscription for series:', subError);
-      // Allow the request to proceed if we can't check subscription
-    }
-  }
+  // Vertical formats default to 9:16; everything else to 16:9 (overridable by client).
+  const resolvedVideoFormat = video_format || defaultVideoFormat(project_type);
+  // AI render look. Normalize to a known palette id; defaults to 'cinematic'.
+  const resolvedVisualStyle = resolveVisualStyleId(visual_style);
 
   const insertData = {
     name,
@@ -120,7 +108,8 @@ router.post("/", requireAuth, extractUserId, addPricingService, checkProjectLimi
     project_type,
     status,
     content_language,
-    video_format,
+    video_format: resolvedVideoFormat,
+    visual_style: resolvedVisualStyle,
     settings: settings || {},
     title,
     author,
@@ -194,7 +183,7 @@ router.post("/", requireAuth, extractUserId, addPricingService, checkProjectLimi
             additional_projects: userSubscription.additional_projects || 0,
             effective_limit: effectiveLimits.projects,
             addon_required: true,
-            addon_price: 5 // EUR per additional project
+            addon_price: 3 // USD per additional project
           },
           action: {
             type: 'addon_purchase_required',
@@ -215,20 +204,18 @@ router.post("/", requireAuth, extractUserId, addPricingService, checkProjectLimi
   let initialSeasonId: string | null = null;
 
   try {
-    // Use provided template content or default empty TipTap document
+    // Default empty screenplay document
     const defaultContent = {
       type: "doc",
       content: [{
-        type: "paragraph",
-        attrs: { class: "action" },
-        content: []
+        type: "action"
       }]
     };
     const initialContent = (initial_content && initial_content.type === 'doc') ? initial_content : defaultContent;
 
-    if (project_type === 'series') {
-      // For TV series: Create Season 1 → Episode 1 → Script
-      if (DEBUG_AI) console.log('🎬 Creating initial structure for TV series...');
+    if (isEpisodic(project_type)) {
+      // For episodic projects (TV series / vertical series): Create Season 1 → Episode 1 → Script
+      if (DEBUG_AI) console.log('🎬 Creating initial episodic structure...');
 
       // 1. Create Season 1
       const { data: season, error: seasonError } = await supabase
@@ -388,6 +375,22 @@ router.get("/:id", requireAuth, extractUserId, async (req: PricingRequest, res) 
   }
 });
 
+// Relationship graph (mind-map) for a project: a read-only projection over
+// characters, locations, scenes, beats, cast and assets plus their derived
+// relationships. Backs the editable project map UI.
+router.get("/:project_id/graph", requireAuth, checkProjectAccess, async (req: Request, res: Response) => {
+  const { project_id } = req.params;
+  const episodeId = (req.query.episode_id as string) || null;
+
+  try {
+    const graph = await buildProjectGraph(project_id, episodeId);
+    res.json(graph);
+  } catch (error) {
+    console.error('❌ GET PROJECT GRAPH ERROR:', error);
+    res.status(500).json({ error: "Failed to build project graph" });
+  }
+});
+
 // Mark project onboarding as completed (owner only)
 router.post("/:id/onboarding-complete", requireAuth, extractUserId, async (req: PricingRequest, res) => {
   const { id } = req.params;
@@ -433,7 +436,7 @@ router.post("/:id/onboarding-complete", requireAuth, extractUserId, async (req: 
   }
 });
 
-// Restore a project with €5 payment validation
+// Restore a project with $5 payment validation
 router.post("/:id/restore", requireAuth, extractUserId, addPricingService, async (req: PricingRequest, res) => {
   const { id } = req.params;
   const userId = req.userId!;
@@ -462,7 +465,7 @@ router.post("/:id/restore", requireAuth, extractUserId, addPricingService, async
     }
     
     // Check if user can afford the restore fee and if it would exceed limits
-    const RESTORE_FEE_EUROS = 5;
+    const RESTORE_FEE_DOLLARS = 5;
     const subscription = await pricingService.getUserSubscription(userId);
     const currentActiveCount = subscription.projects_count || 0;
     const plan = pricingService.getPlan(subscription.plan_id);
@@ -505,8 +508,8 @@ router.post("/:id/restore", requireAuth, extractUserId, addPricingService, async
         user_id: userId,
         project_id: id,
         transaction_type: 'restore',
-        amount_cents: RESTORE_FEE_EUROS * 100, // €5.00 = 500 cents
-        currency: 'EUR',
+        amount_cents: RESTORE_FEE_DOLLARS * 100, // $5.00 = 500 cents
+        currency: 'USD',
         status: 'completed',
         payment_method: isDevelopment ? 'dev_simulation' : 'stripe',
         project_title: project.title,
@@ -537,7 +540,7 @@ router.post("/:id/restore", requireAuth, extractUserId, addPricingService, async
       message: `Project "${project.title}" has been restored`,
       project_id: id,
       project_title: project.title,
-      restore_fee: RESTORE_FEE_EUROS,
+      restore_fee: RESTORE_FEE_DOLLARS,
       active_projects_count: currentActiveCount,
       limit: effectiveLimits.projects
     });
@@ -552,26 +555,7 @@ router.post("/:id/restore", requireAuth, extractUserId, addPricingService, async
 router.put("/:id", requireAuth, extractUserId, addPricingService, async (req: PricingRequest, res) => {
   const { id } = req.params;
   const userId = req.userId; // Extracted from JWT token
-  const { name, description, project_type, status, content_language, video_format, settings, title, author, based_on, contact_info, copyright_notice, registration_number, estimated_duration } = req.body;
-
-  // Check if user is trying to change to series on free plan
-  if (project_type === 'series') {
-    try {
-      const pricingService = req.pricingService!;
-      const userSubscription = await pricingService.getUserSubscription(userId);
-
-      if (userSubscription.plan_id === 'free') {
-        return res.status(403).json({
-          error: 'feature_not_available',
-          error_type: 'series_requires_pro',
-          message: 'TV Series projects (with seasons and episodes) are only available on the Pro plan.',
-          redirect_to: '/projects?view=plans'
-        });
-      }
-    } catch (subError) {
-      console.error('❌ Error checking subscription for series:', subError);
-    }
-  }
+  const { name, description, project_type, status, content_language, video_format, visual_style, settings, title, author, based_on, contact_info, copyright_notice, registration_number, estimated_duration } = req.body;
 
   // Check if project is archived first and user owns it
   const { data: existingProject, error: fetchError } = await supabase
@@ -586,7 +570,7 @@ router.put("/:id", requireAuth, extractUserId, addPricingService, async (req: Pr
   // Prevent editing archived projects
   if (existingProject.status === 'archived') {
     return res.status(403).json({
-      error: "Archived projects are read-only. You can unarchive this project for €5 to make it editable again.",
+      error: "Archived projects are read-only. You can unarchive this project for $5 to make it editable again.",
       can_unarchive: true,
       unarchive_fee: 5
     });
@@ -600,6 +584,7 @@ router.put("/:id", requireAuth, extractUserId, addPricingService, async (req: Pr
   if (status !== undefined) updateData.status = status;
   if (content_language !== undefined) updateData.content_language = content_language;
   if (video_format !== undefined) updateData.video_format = video_format;
+  if (visual_style !== undefined) updateData.visual_style = resolveVisualStyleId(visual_style);
   if (settings !== undefined) updateData.settings = settings;
   // Handle estimated_duration by merging into settings JSONB
   if (estimated_duration !== undefined) {
@@ -631,7 +616,7 @@ router.put("/:id", requireAuth, extractUserId, addPricingService, async (req: Pr
     .eq("user_id", userId) // Ensure user owns this project
     .select()
     .single();
-    
+
   if (error) {
     console.error('❌ PROJECT UPDATE ERROR:', {
       error: error,
@@ -644,11 +629,86 @@ router.put("/:id", requireAuth, extractUserId, addPricingService, async (req: Pr
     return res.status(500).json({ error: error.message });
   }
 
+  // If project was just changed to an episodic type, ensure Season 1 + Episode 1 + Script exist
+  if (isEpisodic(project_type)) {
+    try {
+      const { data: existingSeasons } = await supabase
+        .from('seasons')
+        .select('id')
+        .eq('project_id', id)
+        .limit(1);
+
+      if (!existingSeasons || existingSeasons.length === 0) {
+        // Create Season 1
+        const { data: season } = await supabase
+          .from('seasons')
+          .insert([{ project_id: id, season_number: 1, title: 'Season 1' }])
+          .select()
+          .single();
+
+        if (season) {
+          // Create Episode 1
+          const { data: episode } = await supabase
+            .from('episodes')
+            .insert([{ season_id: season.id, project_id: id, episode_number: 1, title: 'Episode 1' }])
+            .select()
+            .single();
+
+          if (episode) {
+            // Find the existing film script (no episode_id) and link it, or create a new one
+            const { data: existingScript } = await supabase
+              .from('scripts')
+              .select('id')
+              .eq('project_id', id)
+              .is('episode_id', null)
+              .order('created_at', { ascending: true })
+              .limit(1)
+              .single();
+
+            if (existingScript) {
+              // Link the existing script to the new episode
+              await supabase
+                .from('scripts')
+                .update({ episode_id: episode.id })
+                .eq('id', existingScript.id);
+              await supabase
+                .from('episodes')
+                .update({ script_id: existingScript.id })
+                .eq('id', episode.id);
+            } else {
+              // Create a fresh script for Episode 1
+              const { data: newScript } = await supabase
+                .from('scripts')
+                .insert([{
+                  project_id: id,
+                  episode_id: episode.id,
+                  title: 'Untitled Script',
+                  content: { type: 'doc', content: [{ type: 'action' }] },
+                  is_ai_generated: false
+                }])
+                .select()
+                .single();
+              if (newScript) {
+                await supabase
+                  .from('episodes')
+                  .update({ script_id: newScript.id })
+                  .eq('id', episode.id);
+              }
+            }
+          }
+        }
+      }
+    } catch (migrationError) {
+      console.error('⚠️ Failed to migrate film → series structure:', migrationError);
+      // Don't fail the response — the project update itself succeeded
+    }
+  }
+
   res.json(data);
 });
 
 // Update project status specifically
-router.patch("/:id/status", requireAuth, extractUserId, addPricingService, async (req: PricingRequest, res) => {
+router.patch("/:id/status", requireAuth, extractUserId, async (req: Request, res: Response) => {
   const { id } = req.params;
   const userId = req.userId; // Extracted from JWT token
   const { status } = req.body;
@@ -677,7 +737,7 @@ router.patch("/:id/status", requireAuth, extractUserId, addPricingService, async
   // Prevent changing status of archived projects (except to unarchive via separate endpoint)
   if (existingProject.status === 'archived' && status !== 'archived') {
     return res.status(403).json({
-      error: "Archived projects are read-only. You can unarchive this project for €5 to make changes.",
+      error: "Archived projects are read-only. You can unarchive this project for $5 to make changes.",
       can_unarchive: true,
       unarchive_fee: 5
     });
@@ -689,23 +749,7 @@ router.patch("/:id/status", requireAuth, extractUserId, addPricingService, async
     return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
   }
 
-  // Block free plan users from archiving (they cannot unarchive later)
-  if (status === 'archived') {
-    try {
-      const pricingService = req.pricingService!;
-      const userSubscription = await pricingService.getUserSubscription(userId);
-      if (userSubscription.plan_id === 'free') {
-        return res.status(403).json({
-          error: 'feature_not_available',
-          error_type: 'archive_requires_pro',
-          message: 'Archiving projects is only available on the Pro plan. Free plan users cannot reactivate archived projects.',
-          redirect_to: '/projects?view=plans'
-        });
-      }
-    } catch (subError) {
-      console.error('❌ Error checking subscription for archive:', subError);
-    }
-  }
+  // All plans can archive. Unarchiving requires payment (handled separately).
 
   const { data, error } = await supabase
     .from("projects")
@@ -752,7 +796,7 @@ router.delete("/:id", requireAuth, extractUserId, async (req: PricingRequest, re
   // Prevent deleting archived projects
   if (existingProject.status === 'archived') {
     return res.status(403).json({
-      error: "Archived projects cannot be deleted. You can unarchive this project for €5 first, then delete it.",
+      error: "Archived projects cannot be deleted. You can unarchive this project for $5 first, then delete it.",
       can_unarchive: true,
       unarchive_fee: 5
     });
@@ -1151,8 +1195,8 @@ router.post("/:id/unarchive-check", requireAuth, extractUserId, addPricingServic
       current_active_projects: currentActiveCount,
       project_limit: effectiveLimits.projects,
       after_unarchive_count: newActiveCount,
-      addon_price: 4, // €4/month per additional project
-      addon_currency: 'EUR'
+      addon_price: 3, // $3/month per additional project
+      addon_currency: 'USD'
     });
 
   } catch (error: any) {
@@ -1199,12 +1243,13 @@ router.post("/:id/unarchive", requireAuth, extractUserId, addPricingService, asy
 
     const subscription = await pricingService.getUserSubscription(userId);
 
-    // Block free plan users
-    if (subscription.plan_id === 'free') {
-      if (DEBUG_AI) console.log(`❌ UNARCHIVE BLOCKED: Free plan users cannot unarchive projects`);
+    // Block only if no subscription at all (no addons, no plan)
+    const hasAnySubscription = !!subscription.stripe_subscription_id || (subscription.additional_projects || 0) > 0;
+    if (!hasAnySubscription) {
+      if (DEBUG_AI) console.log(`❌ UNARCHIVE BLOCKED: No subscription or addons`);
       return res.status(403).json({
         error: 'feature_not_available',
-        message: 'Unarchiving is only available for Pro subscribers.',
+        message: 'Unarchiving requires an active subscription or project addon.',
         redirect_to: '/profile/plans'
       });
     }

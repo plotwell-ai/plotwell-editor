@@ -1,0 +1,31 @@
+{
+  "name": "plotwell-demo-recordings",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "auth:save": "npx ts-node --esm utils/saveAuth.ts",
+    "demo:manual": "npx playwright test 00-manual",
+    "demo:editor": "npx playwright test 01-editor",
+    "demo:characters": "npx playwright test 02-characters",
+    "demo:locations": "npx playwright test 03-locations",
+    "demo:storyboard": "npx playwright test 04-storyboard",
+    "demo:checkout": "npx playwright test 05-checkout",
+    "demo:all": "npx playwright test",
+    "demo:finalize": "npx ts-node --esm scripts/finalize.ts",
+    "demo:finalize:one": "npx ts-node --esm scripts/finalize.ts",
+    "editor": "npx ts-node --esm editor/server.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "dotenv": "^16.4.7",
+    "ts-node": "^10.9.2"
+  },
+  "dependencies": {
+    "@types/fluent-ffmpeg": "^2.1.28",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "fluent-ffmpeg": "^2.1.3"
+  }
+}

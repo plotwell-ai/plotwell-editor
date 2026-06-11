@@ -5,6 +5,18 @@ import { extractUserId, PricingRequest } from '../middleware/pricingMiddleware';
 import { z } from 'zod';
 import { PricingService } from '../services/pricingService';
 import { emailService } from '../services/emailService';
+import {
+  applyScriptContentToActiveRoom,
+  flushActiveScriptRoomToDatabase,
+  getCollaborationRoomClientCount,
+  getCollaborationRoomBootstrapState,
+  getActiveScriptRoomContent,
+  hasActiveCollaborationRoom,
+  invalidateCollaborationDocumentState,
+  isEmptyProseMirrorDoc,
+  isEmptyYjsProsemirrorState,
+  isValidYjsState,
+} from '../services/collaborationServer';
 // Note: AddonBillingService has been removed - replaced with unified billing system
 
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
@@ -17,34 +29,14 @@ const router = express.Router();
 // MIDDLEWARE FOR COLLABORATION ACCESS
 // =============================================
 
-// Custom middleware for collaboration feature access (Paid plan required)
+// Collaboration is available on all plans (free plan includes 1 collaborator slot).
+// Limit enforcement happens at the invite endpoint via canPerformAction('add_collaborator').
 const requireCollaborationAccess = async (req: PricingRequest, res: Response, next: any) => {
-  try {
-    const userId = req.userId || req.user?.id;
-
-    if (!userId) {
-      return res.status(401).json({ error: 'User not authenticated' });
-    }
-
-    // Check collaboration access for the user (Paid plan required)
-    const pricingService = new PricingService(supabase);
-    const hasCollaborationAccess = await pricingService.hasPaidPlan(userId);
-
-    if (!hasCollaborationAccess) {
-      return res.status(403).json({
-        error: 'Collaboration features require a Pro plan',
-        error_type: 'collaboration_blocked_free_plan',
-        message: 'Upgrade to Pro to use collaboration features',
-        feature: 'collaboration',
-        redirect_to: '/projects?view=plans'
-      });
-    }
-
-    next();
-  } catch (error) {
-    console.error('❌ Error checking collaboration access:', error);
-    res.status(500).json({ error: 'Internal server error' });
+  const userId = req.userId || req.user?.id;
+  if (!userId) {
+    return res.status(401).json({ error: 'User not authenticated' });
   }
+  next();
 };
 
 // =============================================
@@ -267,7 +259,8 @@ router.post('/projects/:projectId/collaborators/invite', requireAuth, extractUse
 
     // Validate request body
     const validatedData = inviteCollaboratorSchema.parse(req.body);
-    const { email, role, message } = validatedData;
+    const { email: rawEmail, role, message } = validatedData;
+    const email = rawEmail.toLowerCase().trim();
 
     // Check if user can invite others
     const { hasAccess, permissions } = await checkProjectAccess(userId, projectId, 'editor');
@@ -450,16 +443,13 @@ router.get('/user/pending-invitations', requireAuth, extractUserId, async (req: 
   try {
     const userId = req.user.id;
 
-    // Get user's email to match with invitations
-    const { data: profile, error: profileError } = await supabase.auth.admin.getUserById(userId);
-    
-    if (profileError || !profile.user?.email) {
-      console.error(' Could not get user profile:', profileError);
-      // Return empty invitations instead of error to prevent frontend crashes
-      return res.json([]);
-    }
+    // Email is included in the Supabase JWT payload — no extra DB call needed
+    const userEmail = (req.user as any).email;
 
-    const userEmail = profile.user.email;
+    if (!userEmail) {
+      console.error('❌ pending-invitations: no email in JWT payload for user', userId);
+      return res.json({ invitations: [] });
+    }
 
     // Get pending invitations for this user's email
     const { data: invitations, error } = await supabase
@@ -489,7 +479,30 @@ router.get('/user/pending-invitations', requireAuth, extractUserId, async (req: 
       return res.status(500).json({ error: error.message });
     }
 
-    res.json({ invitations: invitations || [] });
+    // Fetch inviter names in a single batch query
+    const inviterIds = [...new Set((invitations || []).map((inv: any) => inv.inviter_id).filter(Boolean))];
+    const inviterMap: Record<string, string> = {};
+    if (inviterIds.length > 0) {
+      const { data: inviters } = await supabase
+        .from('users')
+        .select('id, full_name, email')
+        .in('id', inviterIds);
+      for (const inviter of inviters || []) {
+        inviterMap[inviter.id] = inviter.full_name || inviter.email || 'Someone';
+      }
+    }
+
+    // Map to the shape the frontend expects
+    const mapped = (invitations || []).map((inv: any) => ({
+      id: inv.id,
+      token: inv.token,
+      role: inv.role,
+      project_name: inv.projects?.name || 'Unknown Project',
+      inviter_name: inviterMap[inv.inviter_id] || 'Someone',
+      expires_at: inv.expires_at,
+    }));
+
+    res.json({ invitations: mapped });
   } catch (error) {
     console.error('Error getting pending invitations:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -631,7 +644,7 @@ router.post('/invitations/:token/accept', requireAuth, extractUserId, async (req
       userEmail = profile?.email;
     }
     
-    if (userEmail !== invitation.email) {
+    if (userEmail?.toLowerCase() !== invitation.email?.toLowerCase()) {
       return res.status(403).json({ error: 'Email mismatch' });
     }
 
@@ -707,7 +720,7 @@ router.post('/invitations/:token/decline', requireAuth, extractUserId, async (re
       userEmail = profile?.email;
     }
 
-    if (userEmail !== invitation.email) {
+    if (userEmail?.toLowerCase() !== invitation.email?.toLowerCase()) {
       return res.status(403).json({ error: 'Email mismatch' });
     }
 
@@ -967,6 +980,46 @@ router.post('/projects/:projectId/sessions', requireAuth, extractUserId, require
       collaborationDoc = existingDoc;
     }
 
+    if (document_type === 'script' && collaborationDoc?.yjs_state) {
+      await supabase
+        .from('collaboration_documents')
+        .update({
+          yjs_state: null,
+          yjs_vector_clock: {},
+          last_updated: new Date().toISOString(),
+        })
+        .eq('id', collaborationDoc.id);
+
+      collaborationDoc = {
+        ...collaborationDoc,
+        yjs_state: null,
+        yjs_vector_clock: {},
+      };
+    }
+
+    if (document_type !== 'script' && collaborationDoc?.yjs_state) {
+      let shouldResetCollaborationState = !isValidYjsState(collaborationDoc.yjs_state);
+      let resetReason = shouldResetCollaborationState ? 'corrupt' : '';
+
+      if (shouldResetCollaborationState) {
+        console.warn('Resetting collaboration document state before session start:', {
+          projectId,
+          document_type,
+          document_id,
+          reason: resetReason,
+        });
+
+        await invalidateCollaborationDocumentState(projectId, document_type, document_id);
+
+        collaborationDoc = {
+          ...collaborationDoc,
+          yjs_state: null,
+          yjs_vector_clock: {},
+          collaborator_count: 0,
+        };
+      }
+    }
+
     // Update user presence
     await supabase
       .from('user_presence')
@@ -981,8 +1034,14 @@ router.post('/projects/:projectId/sessions', requireAuth, extractUserId, require
         onConflict: 'user_id,project_id'
       });
 
-    res.json({ 
+    const bootstrapState = await getCollaborationRoomBootstrapState(projectId, document_type, document_id);
+    const activeClientCount = getCollaborationRoomClientCount(projectId, document_type, document_id);
+
+    res.json({
       collaboration_document: collaborationDoc,
+      active_client_count: activeClientCount,
+      yjs_state: bootstrapState.yjsState,
+      content: bootstrapState.content,
       websocket_url: `${process.env.WEBSOCKET_URL}/collaboration/${projectId}/${document_type}/${document_id}` 
     });
   } catch (error) {
@@ -990,6 +1049,108 @@ router.post('/projects/:projectId/sessions', requireAuth, extractUserId, require
       return res.status(400).json({ error: 'Invalid request data', details: error.errors });
     }
     console.error('Error starting collaboration session:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/projects/:projectId/scripts/:scriptId/flush', requireAuth, extractUserId, requireCollaborationAccess, async (req, res) => {
+  try {
+    const { projectId, scriptId } = req.params;
+    const userId = req.user.id;
+    const { change_summary, create_version = false, page_count } = req.body || {};
+
+    const { hasAccess, permissions } = await checkProjectAccess(userId, projectId);
+    if (!hasAccess) return res.status(403).json({ error: 'Access denied' });
+    if (!permissions?.can_edit_content) return res.status(403).json({ error: 'No edit permissions' });
+
+    const result = await flushActiveScriptRoomToDatabase(projectId, scriptId, {
+      userId,
+      changeSummary: change_summary || 'Manual save',
+      createVersion: Boolean(create_version),
+    });
+
+    if (!result.flushed) {
+      return res.status(409).json({
+        error: 'No active collaboration room for script',
+        active_room: false,
+      });
+    }
+
+    if (Number.isInteger(page_count) && page_count > 0) {
+      await supabase
+        .from('scripts')
+        .update({ page_count })
+        .eq('id', scriptId)
+        .eq('project_id', projectId);
+    }
+
+    res.json({
+      success: true,
+      active_room: true,
+      content: result.content,
+      flushed_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Error flushing script collaboration room:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/projects/:projectId/scripts/:scriptId/apply', requireAuth, extractUserId, requireCollaborationAccess, async (req, res) => {
+  try {
+    const { projectId, scriptId } = req.params;
+    const userId = req.user.id;
+    const { content, change_summary, create_version = false } = req.body || {};
+
+    if (!content || isEmptyProseMirrorDoc(content)) {
+      return res.status(400).json({ error: 'Content is required' });
+    }
+
+    const { hasAccess, permissions } = await checkProjectAccess(userId, projectId);
+    if (!hasAccess) return res.status(403).json({ error: 'Access denied' });
+    if (!permissions?.can_edit_content) return res.status(403).json({ error: 'No edit permissions' });
+
+    const hasRoom = hasActiveCollaborationRoom(projectId, 'script', scriptId);
+    if (hasRoom) {
+      if (create_version) {
+        await flushActiveScriptRoomToDatabase(projectId, scriptId, {
+          userId,
+          changeSummary: change_summary || 'Before external script update',
+          createVersion: true,
+        });
+      }
+
+      const result = await applyScriptContentToActiveRoom(projectId, scriptId, content, {
+        userId,
+        changeSummary: change_summary || 'External script update',
+        createVersion: false,
+        flush: true,
+      });
+
+      return res.json({
+        success: true,
+        active_room: true,
+        content: result.content || getActiveScriptRoomContent(projectId, scriptId),
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('scripts')
+      .update({ content, updated_at: new Date().toISOString() })
+      .eq('id', scriptId)
+      .eq('project_id', projectId)
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    res.json({
+      success: true,
+      active_room: false,
+      content: data.content,
+    });
+  } catch (error) {
+    console.error('Error applying script collaboration update:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

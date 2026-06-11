@@ -25,18 +25,24 @@ async function resolveStoryboardPanelUrls(panels: any[]): Promise<any[]> {
 
   for (let i = 0; i < result.length; i++) {
     const imageUrl = result[i].image_url;
-    if (!imageUrl) continue;
+    if (imageUrl) {
+      // Detect which bucket this image belongs to
+      const bucket = detectBucket(imageUrl);
+      if (bucket) {
+        result[i].image_url = await getSignedUrl(bucket, imageUrl);
+      } else if (!imageUrl.startsWith('http')) {
+        // Plain path without identifiable bucket - try storyboard-images first, then project-assets
+        result[i].image_url = await getSignedUrl(
+          imageUrl.startsWith('ai-generated/') ? BUCKETS.STORYBOARD_IMAGES : BUCKETS.PROJECT_ASSETS,
+          imageUrl
+        );
+      }
+    }
 
-    // Detect which bucket this image belongs to
-    const bucket = detectBucket(imageUrl);
-    if (bucket) {
-      result[i].image_url = await getSignedUrl(bucket, imageUrl);
-    } else if (!imageUrl.startsWith('http')) {
-      // Plain path without identifiable bucket - try storyboard-images first, then project-assets
-      result[i].image_url = await getSignedUrl(
-        imageUrl.startsWith('ai-generated/') ? BUCKETS.STORYBOARD_IMAGES : BUCKETS.PROJECT_ASSETS,
-        imageUrl
-      );
+    // Sign the generated video path so the player gets a playable URL.
+    const videoUrl = result[i].video_url;
+    if (videoUrl && !videoUrl.startsWith('http')) {
+      result[i].video_url = await getSignedUrl(BUCKETS.GENERATED_VIDEO, videoUrl);
     }
   }
 
@@ -72,16 +78,15 @@ router.get("/scenes", requireAuth, checkProjectAccess, extractUserId, addPricing
         scriptId = episode.script_id;
       }
     } else {
-      // Film: Get the project's production script
+      // Film: Use same script priority as production (active_script_id > prod_script_id > latest)
+      // This ensures scene_id hashes are consistent between storyboard and shot list import
       const { data: project } = await supabase
         .from('projects')
-        .select('prod_script_id')
+        .select('prod_script_id, active_script_id')
         .eq('id', project_id)
         .single();
 
-      if (project?.prod_script_id) {
-        scriptId = project.prod_script_id;
-      }
+      scriptId = project?.active_script_id || project?.prod_script_id || null;
     }
 
     // Fetch the script content
@@ -93,6 +98,18 @@ router.get("/scenes", requireAuth, checkProjectAccess, extractUserId, addPricing
         .eq('id', scriptId)
         .single();
       script = data;
+    }
+
+    // Fallback: latest script for project
+    if (!script) {
+      const { data: latestScript } = await supabase
+        .from('scripts')
+        .select('id, content')
+        .eq('project_id', project_id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+      script = latestScript;
     }
 
     if (!script) {
@@ -247,8 +264,11 @@ router.post("/", requireAuth, extractUserId, addPricingService, requireFeature('
     scene_description,
     shot_type,
     camera_movement,
+    camera_direction, // Optional - explicit per-shot camera move (drives video animation)
     duration,
     notes,
+    lighting,
+    mood,
     linked_character_ids, // Optional - array of character UUIDs (max 3)
     linked_location_id, // Optional - location UUID for AI image reference
   } = req.body;
@@ -297,8 +317,11 @@ router.post("/", requireAuth, extractUserId, addPricingService, requireFeature('
       scene_description,
       shot_type,
       camera_movement,
+      camera_direction: camera_direction || '',
       duration,
       notes,
+      lighting: lighting || '',
+      mood: mood || '',
     };
 
     // Add episode_id only if provided (for TV series)
@@ -415,9 +438,13 @@ router.put("/:id", requireAuth, extractUserId, addPricingService, requireFeature
     scene_description,
     shot_type,
     camera_movement,
+    camera_direction, // Optional - explicit per-shot camera move (drives video animation)
     duration,
     notes,
+    lighting,
+    mood,
     image_url,
+    image_fidelity, // Optional - 'sketch' | 'cinematic'; gates Animate (cinematic only)
     linked_character_ids, // Optional - array of character UUIDs (max 3)
     linked_location_id, // Optional - location UUID for AI image reference
   } = req.body;
@@ -432,8 +459,23 @@ router.put("/:id", requireAuth, extractUserId, addPricingService, requireFeature
     camera_movement,
     duration,
     notes,
+    lighting: lighting ?? '',
+    mood: mood ?? '',
     image_url,
   };
+
+  // Persist camera direction only when explicitly provided, so image-only updates
+  // (e.g. regenerating the still) don't wipe an existing camera move.
+  if (camera_direction !== undefined) {
+    updateData.camera_direction = camera_direction || '';
+  }
+
+  // Persist image fidelity when provided. Clearing the image clears fidelity too.
+  if (image_fidelity !== undefined) {
+    updateData.image_fidelity = image_fidelity || null;
+  } else if (image_url === null) {
+    updateData.image_fidelity = null;
+  }
 
   // Add linked_character_ids if provided (max 3), or set to empty array if explicitly passed
   if (linked_character_ids !== undefined) {
@@ -445,6 +487,29 @@ router.put("/:id", requireAuth, extractUserId, addPricingService, requireFeature
   // Add linked_location_id if provided, or set to null if explicitly cleared
   if (linked_location_id !== undefined) {
     updateData.linked_location_id = linked_location_id || null;
+  }
+
+  // If the source image is changing (regenerated, replaced, or removed), any
+  // existing video was generated from the OLD still and no longer matches the
+  // panel — invalidate it so the UI shows the new image + Animate again.
+  if (image_url !== undefined) {
+    const { data: current } = await supabase
+      .from("storyboard_panels")
+      .select("image_url, video_url, video_status")
+      .eq("id", id)
+      .single();
+
+    if (current && image_url !== current.image_url && (current.video_url || current.video_status)) {
+      Object.assign(updateData, {
+        video_status: null,
+        video_url: null,
+        video_job_id: null,
+        video_duration: null,
+        video_model: null,
+        video_error: null,
+        video_created_at: null,
+      });
+    }
   }
 
   const { data, error } = await supabase
@@ -522,10 +587,22 @@ router.post("/:id/upload-image", requireAuth, extractUserId, addPricingService, 
       return res.status(500).json({ error: uploadError.message });
     }
 
-    // Store the path (not public URL) - signed URLs generated on read
+    // Store the path (not public URL) - signed URLs generated on read.
+    // Uploaded images are treated as cinematic so they can be animated.
+    // A new image replaces the old one, so invalidate any existing video.
     const { data, error } = await supabase
       .from("storyboard_panels")
-      .update({ image_url: fileName })
+      .update({
+        image_url: fileName,
+        image_fidelity: 'cinematic',
+        video_status: null,
+        video_url: null,
+        video_job_id: null,
+        video_duration: null,
+        video_model: null,
+        video_error: null,
+        video_created_at: null,
+      })
       .eq("id", id)
       .select()
       .single();

@@ -1,7 +1,8 @@
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 import { stripeService } from './stripeService';
-import { getPlanById, getStripePriceId, getAddonStripePriceId, currentPriceIds, PRICING_PLANS, getAddonPriceId, getAddonPriceForPlan } from '../config/pricingPlans';
+const DEBUG_AI = process.env.DEBUG_AI === 'true';
+import { getPlanById, getStripePriceId, getAddonStripePriceId, currentPriceIds, PRICING_PLANS, getAddonPriceId, getAddonPriceForPlan, EXPANSION_PRICING } from '../config/pricingPlans';
 import { getCurrentTime, getCurrentDate, getDaysUntil, addTimeToNow, addOneMonth, calculateBillingPeriodEnd, isSimulationMode } from '../utils/timeUtils';
 import { acquireLock, releaseLock } from './operationLockService';
 import { getPricesForCurrency, getCurrencyConfig, type CurrencyCode, type CurrencyPriceTable } from '../config/currencies';
@@ -23,7 +24,7 @@ export interface BillingChangeRequest {
     // Note: AI credits are now one-time purchases via /api/ai-credits/purchase
   };
   immediate_cancellation?: boolean;
-  currency?: string; // e.g. 'eur', 'usd', 'gbp' - detected from user's location or Stripe customer
+  currency?: string; // e.g. 'usd' - single currency model
 }
 
 export interface BillingPreview {
@@ -49,6 +50,7 @@ export interface BillingPreview {
   };
   proration_details?: {
     days_remaining: number;
+    total_days?: number;
     estimated_credit: number; // cents
     estimated_cost: number; // cents
   };
@@ -91,12 +93,20 @@ interface BillingCycleInfo {
   progressRatio: number; // 0-1, how far through the billing cycle we are
 }
 
+// Stripe v18: current_period_start/end moved from Subscription to SubscriptionItem
+function getSubPeriodStart(sub: Stripe.Subscription): number | null {
+  return sub.items?.data?.[0]?.current_period_start ?? null;
+}
+function getSubPeriodEnd(sub: Stripe.Subscription): number | null {
+  return sub.items?.data?.[0]?.current_period_end ?? null;
+}
+
 function calculateBillingCycleInfo(subscription: Stripe.Subscription): BillingCycleInfo {
   const now = new Date();
 
-  // Handle missing timestamps with fallbacks
-  let periodStartTimestamp = (subscription as any).current_period_start;
-  let periodEndTimestamp = (subscription as any).current_period_end;
+  // Use typed SDK fields directly — (as any) casts were silently returning undefined
+  let periodStartTimestamp = getSubPeriodStart(subscription);
+  let periodEndTimestamp = getSubPeriodEnd(subscription);
 
   // If timestamps are missing, create fallback billing cycle (30 days from now)
   if (!periodStartTimestamp || !periodEndTimestamp) {
@@ -135,7 +145,7 @@ export class UnifiedBillingService {
    * Returns plan price and addon price based on the request's currency.
    */
   private getCurrencyPrices(request: BillingChangeRequest, billingCycle: 'monthly' | 'yearly' = 'monthly') {
-    const currency = (request.currency || 'eur').toUpperCase() as CurrencyCode;
+    const currency = 'USD' as CurrencyCode;
     const prices = getPricesForCurrency(currency);
     const config = getCurrencyConfig(currency);
     return {
@@ -168,25 +178,25 @@ export class UnifiedBillingService {
    * Round charges up to next 50 cents, credits down to previous 50 cents
    */
   private roundCustomerFriendly(amount: number, isCredit: boolean): number {
-    const euros = Math.floor(Math.abs(amount));
-    const cents = Math.abs(amount) - euros;
+    const dollars = Math.floor(Math.abs(amount));
+    const cents = Math.abs(amount) - dollars;
 
     let roundedAmount: number;
     if (isCredit) {
       // Credits: round DOWN (customer gets slightly less refund but conservative)
       if (cents <= 0.5) {
-        roundedAmount = euros + (cents > 0.25 ? 0.5 : 0);
+        roundedAmount = dollars + (cents > 0.25 ? 0.5 : 0);
       } else {
-        roundedAmount = euros + 0.5;
+        roundedAmount = dollars + 0.5;
       }
     } else {
       // Charges: round UP (customer pays slightly more but gets nice round number)
       if (cents <= 0.25) {
-        roundedAmount = euros + (cents > 0 ? 0.5 : 0);
+        roundedAmount = dollars + (cents > 0 ? 0.5 : 0);
       } else if (cents <= 0.75) {
-        roundedAmount = euros + 0.5;
+        roundedAmount = dollars + 0.5;
       } else {
-        roundedAmount = euros + 1;
+        roundedAmount = dollars + 1;
       }
     }
 
@@ -197,28 +207,22 @@ export class UnifiedBillingService {
    * Get current subscription state for a user
    */
   async getCurrentSubscription(userId: string): Promise<SubscriptionState> {
-    try {
+    const { getSubscriptionRecord } = require('../utils/subscriptionHelpers');
 
-      // Get user's Stripe info
+    try {
+      // Stripe sync (handles missed webhooks)
       const stripeStatus = await stripeService.getSubscriptionStatus(userId);
 
-      // Get addon info from database - get ONLY the active subscription
-      const { data: userSubscription } = await supabase
-        .from('user_subscriptions')
-        .select('additional_projects, additional_collaborators, status')
-        .eq('user_id', userId)
-        .eq('status', 'active')
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle(); // Use maybeSingle() to handle 0 or 1 results gracefully
+      // Canonical DB record (addon counts, etc.)
+      const sub = await getSubscriptionRecord(supabase, userId);
 
-      // Detect billing cycle from Stripe subscription
+      // Detect billing cycle
       let billingCycle: 'monthly' | 'yearly' = 'monthly';
       if (stripeStatus.stripe_subscription_id) {
         billingCycle = await this.detectBillingCycle(stripeStatus.stripe_subscription_id);
       }
 
-      const state: SubscriptionState = {
+      return {
         plan_id: stripeStatus.plan_id || 'free',
         subscription_status: stripeStatus.subscription_status || 'active',
         stripe_customer_id: stripeStatus.stripe_customer_id || null,
@@ -226,13 +230,10 @@ export class UnifiedBillingService {
         current_period_start: stripeStatus.current_period_start || null,
         current_period_end: stripeStatus.current_period_end || null,
         cancel_at_period_end: stripeStatus.cancel_at_period_end || false,
-        additional_projects: userSubscription?.additional_projects || 0,
-        additional_collaborators: userSubscription?.additional_collaborators || 0,
+        additional_projects: sub.additional_projects,
+        additional_collaborators: sub.additional_collaborators,
         billing_cycle: billingCycle
       };
-
-
-      return state;
     } catch (error) {
       console.error(`❌ Error getting current subscription for user ${userId}:`, error);
       throw error;
@@ -302,11 +303,6 @@ export class UnifiedBillingService {
 
       const currentState = await this.getCurrentSubscription(userId);
 
-      // Clean up any duplicate subscriptions first
-      if (currentState.stripe_customer_id) {
-        await stripeService.cancelDuplicateSubscriptions(currentState.stripe_customer_id);
-      }
-
       let result: { success: boolean; message: string; details?: any };
 
       switch (request.type) {
@@ -316,7 +312,7 @@ export class UnifiedBillingService {
           break;
 
         case 'addon_change':
-          // MAIN OPERATION: Adding/removing projects and collaborators at €4 each
+          // MAIN OPERATION: Adding/removing projects and collaborators at $3 each
           result = await this.executeAddonChange(userId, currentState, request);
           break;
 
@@ -481,8 +477,8 @@ export class UnifiedBillingService {
       const changeType = request.target_plan === 'free' ? 'cancellation' : 'subscription_change';
 
       // Get period info using actual subscription dates with fallback
-      const periodEndTimestamp = (currentSubscription as any).current_period_end;
-      const periodStartTimestamp = (currentSubscription as any).current_period_start;
+      const periodEndTimestamp = getSubPeriodEnd(currentSubscription);
+      const periodStartTimestamp = getSubPeriodStart(currentSubscription);
 
       let daysRemaining = 0;
 
@@ -572,7 +568,7 @@ export class UnifiedBillingService {
           total_immediate_charge: Math.round(this.roundCustomerFriendly((safeImmediateCharge / 100) + (safeAddonTotal - safeCurrentAddonTotal), safeImmediateCharge < 0) * 100), // cents
           next_billing_amount: request.target_plan === 'free' ? 0 : Math.round((safeTargetPrice + safeAddonTotal) * 100), // cents
           next_billing_date: billingDates.next_billing_date,
-          currency: 'eur',
+          currency: 'usd',
           items
         },
         proration_details: daysRemaining > 0 ? {
@@ -591,8 +587,12 @@ export class UnifiedBillingService {
   }
 
   private async previewAddonChange(userId: string, currentState: SubscriptionState, request: BillingChangeRequest): Promise<BillingPreview> {
+    // No subscription yet — preview as a new addon-only subscription
     if (!currentState.stripe_subscription_id) {
-      throw new Error('Active subscription required for addon changes');
+      return await this.previewNewSubscription(currentState, {
+        ...request,
+        target_plan: 'free'
+      });
     }
 
     // Block addon additions if subscription is set to cancel
@@ -610,7 +610,7 @@ export class UnifiedBillingService {
             addon_costs: 0,
             total_immediate_charge: 0,
             next_billing_amount: 0,
-            currency: 'eur'
+            currency: 'usd'
           },
           blocked: true,
           validation_errors: [{ code: 'subscription_cancelling', params: {} }],
@@ -628,7 +628,6 @@ export class UnifiedBillingService {
     const billingCycle = await this.detectBillingCycle(currentState.stripe_subscription_id);
     const billingLabel = billingCycle === 'yearly' ? 'year' : 'month';
 
-    const currentAddonCosts = this.calculateCurrentAddonCosts(currentState.plan_id, currentState, billingCycle);
     const newAddons = this.mergeAddons(currentState, request.addons);
     const newAddonCosts = this.calculateAddonCosts(currentState.plan_id, newAddons, billingCycle);
 
@@ -646,7 +645,7 @@ export class UnifiedBillingService {
           addon_costs: Math.round(newAddonCosts.total * 100),
           total_immediate_charge: 0,
           next_billing_amount: 0,
-          currency: 'eur'
+          currency: 'usd'
         },
         summary: `Cannot reduce addons: You must reduce usage to fit within the new limits first`,
         validation_errors: addonValidation.blockers,
@@ -655,15 +654,65 @@ export class UnifiedBillingService {
       };
     }
 
-    const subscription = await stripe.subscriptions.retrieve(currentState.stripe_subscription_id);
+    // Expand test_clock in non-production so Stripe test clock frozen_time
+    // can be used as "now" for proration calculations during development testing.
+    // Also expand items so we can read actual addon quantities from Stripe (not stale DB).
+    const expandFields = ['items.data.price'];
+    if (process.env.NODE_ENV !== 'production') expandFields.push('test_clock');
+    const subscription = await stripe.subscriptions.retrieve(
+      currentState.stripe_subscription_id,
+      { expand: expandFields }
+    );
     const currentPeriodEnd = this.getSubscriptionPeriodEnd(subscription);
+
+    // In dev mode, use Stripe test clock's frozen_time as "now" if available,
+    // so proration reflects the simulated date rather than real server time.
+    const getNow = (): Date => {
+      if (process.env.NODE_ENV !== 'production') {
+        const testClock = (subscription as any).test_clock;
+        if (testClock && typeof testClock === 'object' && testClock.frozen_time) {
+          return new Date(testClock.frozen_time * 1000);
+        }
+      }
+      return getCurrentDate();
+    };
+
+    // Read ACTUAL addon quantities from Stripe subscription items (avoids stale DB counts).
+    // This ensures the proration diff reflects reality even when DB is out of sync.
+    // Also try all known price IDs for this addon type so we handle subscriptions created
+    // with a different price ID (e.g. test vs prod, or after a price migration).
+    const stripeItems = subscription.items?.data || [];
+    const projectsPriceId = getAddonPriceId(currentState.plan_id, 'additional_projects', billingCycle);
+    const collaboratorsPriceId = getAddonPriceId(currentState.plan_id, 'additional_collaborators', billingCycle);
+
+    // Match by primary price ID, but also accept the other cycle's price ID as a fallback
+    // to handle subscriptions whose cycle the DB hasn't synced yet.
+    const altProjectsPriceId = getAddonPriceId(currentState.plan_id, 'additional_projects', billingCycle === 'monthly' ? 'yearly' : 'monthly');
+    const altCollaboratorsPriceId = getAddonPriceId(currentState.plan_id, 'additional_collaborators', billingCycle === 'monthly' ? 'yearly' : 'monthly');
+
+    const stripeProjectsCount =
+      stripeItems.find(i => i.price.id === projectsPriceId)?.quantity ||
+      stripeItems.find(i => i.price.id === altProjectsPriceId)?.quantity || 0;
+    const stripeCollaboratorsCount =
+      stripeItems.find(i => i.price.id === collaboratorsPriceId)?.quantity ||
+      stripeItems.find(i => i.price.id === altCollaboratorsPriceId)?.quantity || 0;
+
+    // If Stripe items returned 0 but our DB says the user has addons, trust the DB value.
+    // This prevents the "price ID mismatch" scenario from inflating the immediate charge.
+    const currentProjectsCount = Math.max(stripeProjectsCount, currentState.additional_projects || 0);
+    const currentCollaboratorsCount = Math.max(stripeCollaboratorsCount, currentState.additional_collaborators || 0);
+
+    const stripeCurrentAddonCosts = this.calculateAddonCosts(currentState.plan_id, {
+      additional_projects: currentProjectsCount,
+      additional_collaborators: currentCollaboratorsCount,
+    }, billingCycle);
 
     // Use the correct base plan price for the billing cycle
     const basePlanPrice = billingCycle === 'yearly' ? (currentPlan.yearlyPrice || 0) : (currentPlan.price || 0);
 
     // Ensure we have valid prices (prevent NaN in UI)
     const safeCurrentPrice = Number(basePlanPrice) || 0;
-    const safeCurrentAddonTotal = Number(currentAddonCosts.total) || 0;
+    const safeCurrentAddonTotal = Number(stripeCurrentAddonCosts.total) || 0;
     const safeNewAddonTotal = Number(newAddonCosts.total) || 0;
 
     const addonCostDifference = safeNewAddonTotal - safeCurrentAddonTotal;
@@ -673,34 +722,34 @@ export class UnifiedBillingService {
     const addonUnitPrice = this.getAddonUnitPrice(billingCycle);
     const addonUnitPriceCents = this.getAddonUnitPriceCents(billingCycle);
 
-    let immediateCharge: number;
-    let prorationDetails: any = undefined;
+    // Calculate prorated immediate charge for addon additions.
+    // Removals have no immediate refund — savings start on the next billing cycle.
+    // Trialing subscriptions: no immediate charge (billing hasn't started yet).
+    let immediateCharge = 0;
+    let proratedDaysRemaining = 0;
+    let proratedTotalDays = 0;
+    const isTrialing = subscription.status === 'trialing';
+    if (addonCostDifference > 0 && !isTrialing) {
+      const now = getNow();
+      // Always use current_period_start for period start — billing_cycle_anchor equals
+      // trial_end on trialing subs and would give a nonsensical ratio.
+      const periodStartTs = getSubPeriodStart(subscription) ?? subscription.created;
+      const periodStart = new Date(periodStartTs * 1000);
+      const startDay = new Date(periodStart.getFullYear(), periodStart.getMonth(), periodStart.getDate());
+      const endDay = new Date(currentPeriodEnd.getFullYear(), currentPeriodEnd.getMonth(), currentPeriodEnd.getDate());
+      const todayDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      proratedTotalDays = Math.max(1, Math.ceil((endDay.getTime() - startDay.getTime()) / (1000 * 60 * 60 * 24)));
+      proratedDaysRemaining = Math.max(0, Math.ceil((endDay.getTime() - todayDay.getTime()) / (1000 * 60 * 60 * 24)));
+      // Clamp ratio to [0, 1]: >1 can happen when server real-time is before a simulated period start
+      const remainingRatio = proratedTotalDays > 0 ? Math.min(1, proratedDaysRemaining / proratedTotalDays) : 0;
+      immediateCharge = addonCostDifference * remainingRatio;
 
-    if (addonCostDifference > 0) {
-      // Adding addons - calculate prorated charge for remaining period
-      const proratedCharge = await this.calculateAddonProratedCharge(
-        currentState.stripe_subscription_id,
-        addonCostDifference
-      );
-      immediateCharge = proratedCharge;
-
-      prorationDetails = {
-        days_remaining: 0,
-        estimated_credit: 0,
-        estimated_cost: Math.round(immediateCharge * 100) // cents
-      };
-    } else if (addonCostDifference < 0) {
-      // No refund for addon removal (monthly or yearly).
-      // Addon is removed from recurring billing, no credit issued.
-      immediateCharge = 0;
-      prorationDetails = {
-        days_remaining: 0,
-        estimated_credit: 0,
-        estimated_cost: 0
-      };
-    } else {
-      // No change
-      immediateCharge = 0;
+      // Fallback: if the period looks expired (ratio=0) but we know addons are being added,
+      // show the full addon cost rather than $0. Better to show worst-case than nothing.
+      if (remainingRatio === 0 && addonCostDifference > 0) {
+        immediateCharge = addonCostDifference;
+        proratedDaysRemaining = proratedTotalDays;
+      }
     }
 
     // Build itemized breakdown
@@ -747,16 +796,19 @@ export class UnifiedBillingService {
         total_immediate_charge: Math.round(immediateCharge * 100), // cents (negative for refunds)
         next_billing_amount: Math.round(totalNewCost * 100), // cents
         next_billing_date: currentPeriodEnd.toISOString(),
-        currency: 'eur',
+        currency: 'usd',
         items
       },
-      proration_details: prorationDetails,
+      proration_details: addonCostDifference > 0 ? {
+        days_remaining: proratedDaysRemaining,
+        total_days: proratedTotalDays,
+        estimated_credit: 0,
+        estimated_cost: Math.round(immediateCharge * 100)
+      } : undefined,
       summary: addonCostDifference > 0
-        ? `Add addons: Prorated charge €${immediateCharge.toFixed(2)} for current period, then €${addonUnitPrice}/${billingLabel} per addon`
+        ? `Add addons: $${immediateCharge.toFixed(2)} charged today (prorated), then $${addonUnitPrice}/${billingLabel} per addon on next billing cycle`
         : addonCostDifference < 0
-          ? billingCycle === 'yearly'
-            ? `Remove addons: Prorated refund of €${Math.abs(immediateCharge).toFixed(2)} for remaining period`
-            : `Remove addons: No immediate refund, will save €${Math.abs(addonCostDifference).toFixed(2)}/${billingLabel} starting next billing cycle`
+          ? `Remove addons: Saves $${Math.abs(addonCostDifference).toFixed(2)}/${billingLabel} starting next billing cycle`
           : `No addon changes`
     };
   }
@@ -779,7 +831,7 @@ export class UnifiedBillingService {
       try {
         const customer = await stripe.customers.retrieve(currentState.stripe_customer_id);
         if ('balance' in customer && customer.balance && customer.balance < 0) {
-          existingBalance = Math.abs(customer.balance) / 100; // Convert from cents to euros
+          existingBalance = Math.abs(customer.balance) / 100; // Convert from cents to dollars
         }
       } catch (balanceError) {
         console.warn('⚠️ Could not retrieve customer balance:', balanceError);
@@ -800,7 +852,7 @@ export class UnifiedBillingService {
         addon_costs: 0, // cents (no addons on free)
         total_immediate_charge: totalRefundAmount > 0 ? Math.round(this.roundCustomerFriendly(-totalRefundAmount, true) * 100) : 0, // cents (negative for refund)
         next_billing_amount: 0, // cents (free plan)
-        currency: 'eur'
+        currency: 'usd'
       },
       proration_details: totalRefundAmount > 0 ? {
         days_remaining: daysRemaining,
@@ -808,141 +860,8 @@ export class UnifiedBillingService {
         estimated_cost: 0 // cents
       } : undefined,
       summary: totalRefundAmount > 0
-        ? `Downgrade to Free: €${this.roundCustomerFriendly(totalRefundAmount, true).toFixed(2)} refund will be processed within 3-5 business days (includes ${existingBalance > 0 ? 'unused credits + ' : ''}cancellation refund). Immediate cancellation.`
+        ? `Downgrade to Free: $${this.roundCustomerFriendly(totalRefundAmount, true).toFixed(2)} refund will be processed within 3-5 business days (includes ${existingBalance > 0 ? 'unused credits + ' : ''}cancellation refund). Immediate cancellation.`
         : `Downgrade to Free: Subscription cancelled immediately. Switch to Free plan features now.`
-    };
-  }
-
-  /**
-   * Remove all collaborators from user's projects to prepare for free plan downgrade
-   */
-  private async removeAllCollaborators(userId: string): Promise<void> {
-
-    // Get all user's projects
-    const { data: projects, error: projectError } = await supabase
-      .from('projects')
-      .select('id')
-      .eq('user_id', userId);
-
-    if (projectError) {
-      console.error('❌ Error fetching projects for collaborator cleanup:', projectError);
-      throw new Error('Failed to fetch projects for collaborator cleanup');
-    }
-
-    if (!projects || projects.length === 0) {
-      return;
-    }
-
-    const projectIds = projects.map(p => p.id);
-
-    // Remove all collaborators from user's projects
-    const { error: removeError } = await supabase
-      .from('project_collaborators')
-      .update({ status: 'removed' })
-      .in('project_id', projectIds)
-      .eq('status', 'active');
-
-    if (removeError) {
-      console.error('❌ Error removing collaborators:', removeError);
-      throw new Error('Failed to remove collaborators during cancellation');
-    }
-  }
-
-  /**
-   * Validate if user can cancel subscription without exceeding free plan limits
-   */
-  private async validateCancellationEligibility(userId: string): Promise<{
-    canCancel: boolean;
-    blockers: Array<{ code: string; params: Record<string, number> }>;
-    currentUsage: {
-      projects: number;
-      collaborators: number;
-    };
-    cleanupRequired: {
-      projectsToDelete: number;
-      collaboratorsToRemove: number;
-      collaboratorCleanupOptions?: string[];
-    };
-  }> {
-
-    // Get current project count
-    const { data: projects, error: projectError } = await supabase
-      .from('projects')
-      .select('id, name, status')
-      .eq('user_id', userId)
-      .neq('status', 'archived'); // Don't count archived projects
-
-    if (projectError) {
-      console.error('❌ Error fetching projects:', projectError);
-      throw new Error('Failed to check project usage');
-    }
-
-    // Get current collaborator count across all projects
-    const { data: collaborators, error: collabError } = await supabase
-      .from('project_collaborators')
-      .select('user_id, project_id, role')
-      .in('project_id', projects?.map(p => p.id) || [])
-      .eq('status', 'active');
-
-    if (collabError) {
-      console.error('❌ Error fetching collaborators:', collabError);
-      throw new Error('Failed to check collaborator usage');
-    }
-
-    const currentProjectCount = projects?.length || 0;
-    const currentCollaboratorCount = collaborators?.length || 0;
-
-    // Free plan limits
-    const FREE_PLAN_LIMITS = { projects: 1, collaborators: 1 };
-
-    // TRANSLATION-READY: Send structured error data instead of hardcoded English text
-    const blockers: Array<{ code: string; params: Record<string, number> }> = [];
-    const cleanupRequired = {
-      projectsToDelete: Math.max(0, currentProjectCount - FREE_PLAN_LIMITS.projects),
-      collaboratorsToRemove: Math.max(0, currentCollaboratorCount - FREE_PLAN_LIMITS.collaborators),
-      collaboratorCleanupOptions: [] as string[]
-    };
-
-    // Check project limits
-    if (currentProjectCount > FREE_PLAN_LIMITS.projects) {
-      const excess = currentProjectCount - FREE_PLAN_LIMITS.projects;
-      blockers.push({
-        code: 'projects_exceed_limit',
-        params: {
-          current: currentProjectCount,
-          limit: FREE_PLAN_LIMITS.projects,
-          excess: excess
-        }
-      });
-    }
-
-    // Check collaborator limits
-    if (currentCollaboratorCount > FREE_PLAN_LIMITS.collaborators) {
-      const excess = currentCollaboratorCount - FREE_PLAN_LIMITS.collaborators;
-      blockers.push({
-        code: 'collaborators_exceed_limit',
-        params: {
-          current: currentCollaboratorCount,
-          limit: FREE_PLAN_LIMITS.collaborators,
-          excess: excess
-        }
-      });
-
-      // Provide collaborator cleanup options (these will also be translated on frontend)
-      cleanupRequired.collaboratorCleanupOptions = [
-        'manual_removal',
-        'auto_removal_with_confirmation'
-      ];
-    }
-
-    return {
-      canCancel: blockers.length === 0,
-      blockers,
-      currentUsage: {
-        projects: currentProjectCount,
-        collaborators: currentCollaboratorCount
-      },
-      cleanupRequired
     };
   }
 
@@ -1003,7 +922,9 @@ export class UnifiedBillingService {
     }
 
     const currentProjectCount = projects?.length || 0;
-    const currentCollaboratorCount = collaborators?.length || 0;
+    // project_collaborators only has non-owner rows; add 1 for the owner so the count
+    // is comparable to plan.limits.collaborators which always includes the owner.
+    const currentCollaboratorCount = (collaborators?.length || 0) + 1;
 
     const blockers: Array<{ code: string; params: Record<string, number> }> = [];
 
@@ -1021,13 +942,15 @@ export class UnifiedBillingService {
     }
 
     // Check if reducing collaborator addons would exceed new limit
+    // currentCollaboratorCount includes owner (+1); newEffectiveCollaboratorLimit also includes owner.
     if (currentCollaboratorCount > newEffectiveCollaboratorLimit) {
+      const nonOwnerCount = currentCollaboratorCount - 1; // show the user the non-owner count
       const excess = currentCollaboratorCount - newEffectiveCollaboratorLimit;
       blockers.push({
         code: 'addon_reduction_collaborators_exceed_limit',
         params: {
-          current: currentCollaboratorCount,
-          newLimit: newEffectiveCollaboratorLimit,
+          current: nonOwnerCount,
+          newLimit: newEffectiveCollaboratorLimit - 1, // show non-owner limit to user
           excess: excess
         }
       });
@@ -1057,55 +980,50 @@ export class UnifiedBillingService {
       throw new Error(`Current plan not found: ${currentState.plan_id}`);
     }
 
-    // CRITICAL: Check if user can cancel without exceeding free plan limits
-    const usageCheck = await this.validateCancellationEligibility(userId);
-
     const subscription = await stripe.subscriptions.retrieve(currentState.stripe_subscription_id);
     const currentPeriodEnd = this.getSubscriptionPeriodEnd(subscription);
-    const detectedBillingCycle = await this.detectBillingCycle(currentState.stripe_subscription_id);
-    const basePlanPrice = detectedBillingCycle === 'yearly' ? (currentPlan.yearlyPrice || 0) : (currentPlan.price || 0);
 
-    const currentAddonCosts = this.calculateCurrentAddonCosts(currentState.plan_id, currentState, detectedBillingCycle);
-    const safeCurrentPrice = Number(basePlanPrice) || 0;
-    const safeCurrentAddonTotal = Number(currentAddonCosts.total) || 0;
-    const totalCurrentCost = safeCurrentPrice + safeCurrentAddonTotal;
-
-    // If user cannot cancel due to exceeding limits, return blocking preview
-    if (!usageCheck.canCancel) {
-      return {
-        type: 'cancellation',
-        current_plan: currentState.plan_id,
-        target_plan: 'free',
-        cost_breakdown: {
-          base_plan_cost: 0,
-          addon_costs: 0,
-          total_immediate_charge: 0,
-          next_billing_amount: 0,
-          currency: 'eur'
-        },
-        summary: `Cannot cancel: You must reduce usage to free plan limits first`,
-        validation_errors: usageCheck.blockers,
-        cleanup_required: usageCheck.cleanupRequired,
-        current_usage: usageCheck.currentUsage,
-        blocked: true
-      };
-    }
-
-    // User can cancel - show normal cancellation preview
+    // Always allow cancellation - user keeps access until period end
     return {
       type: 'cancellation',
       current_plan: currentState.plan_id,
       target_plan: 'free',
       cost_breakdown: {
-        base_plan_cost: 0, // cents (free plan)
-        addon_costs: 0, // cents (no addons on free)
-        total_immediate_charge: 0, // cents (no immediate charge for cancellation)
-        next_billing_amount: 0, // cents (free plan)
-        currency: 'eur'
+        base_plan_cost: 0,
+        addon_costs: 0,
+        total_immediate_charge: 0,
+        next_billing_amount: 0,
+        currency: 'usd'
       },
-      summary: `Cancel subscription: Access until ${currentPeriodEnd.toLocaleDateString()}, then downgrade to Free plan`,
-      cleanup_required: usageCheck.cleanupRequired
+      summary: `Cancel subscription: Access until ${currentPeriodEnd.toLocaleDateString()}, then downgrade to Free plan`
     };
+  }
+
+  // Helper: get billing country from customer address, PM, or user language
+  private async getBillingCountry(userId: string): Promise<string | null> {
+    try {
+      const customerId = await stripeService.getOrCreateCustomer(userId);
+      const customer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
+      if ((customer as any).address?.country) return (customer as any).address.country;
+
+      const invoicePm = (customer as any).invoice_settings?.default_payment_method;
+      let pmId = invoicePm ? (typeof invoicePm === 'string' ? invoicePm : invoicePm.id) : null;
+      if (!pmId) {
+        const pms = await stripe.paymentMethods.list({ customer: customerId, limit: 1 });
+        if (pms.data.length > 0) pmId = pms.data[0].id;
+      }
+      if (pmId) {
+        const pm = await stripe.paymentMethods.retrieve(pmId);
+        if (pm.billing_details?.address?.country) return pm.billing_details.address.country;
+      }
+
+      const { data: userData } = await supabase.from('users').select('ui_language').eq('id', userId).single();
+      if (userData?.ui_language) {
+        const langToCountry: Record<string, string> = { es: 'ES', en: 'US', fr: 'FR', de: 'DE', it: 'IT', pt: 'PT' };
+        return langToCountry[userData.ui_language] || null;
+      }
+    } catch (e) { /* ignore */ }
+    return null;
   }
 
   // Private methods for executing changes
@@ -1130,11 +1048,45 @@ export class UnifiedBillingService {
       throw new Error(`Stripe price ID not found for plan ${targetPlan} (${billingCycle})`);
     }
 
-    // Create embedded checkout session for new subscription
-    const session = await stripeService.createCheckoutSession(userId, priceId, {
+    const metadata = {
       plan_id: targetPlan,
       billing_cycle: billingCycle
-    }, true, request.currency); // Enable embedded mode + multi-currency
+    };
+
+    // PAYMENT ELEMENT FLOW
+    // Check trial eligibility first
+    const eligibleForTrial = await stripeService.checkTrialEligibility(userId);
+    if (DEBUG_AI) console.log(`🎟️ Trial eligibility for ${userId.slice(0, 8)}***: ${eligibleForTrial}`);
+
+    // Both trial and non-trial use SetupIntent flow.
+    // Subscription is created in verify-payment after card is validated.
+    const setupResult = await stripeService.createSetupIntent(userId, priceId, eligibleForTrial, metadata);
+
+    // Estimate tax for display
+    let taxInfo: { total_cents?: number; tax_cents?: number; subtotal_cents?: number } = {};
+    try {
+      const billingCountry = await this.getBillingCountry(userId);
+      if (billingCountry) {
+        const priceObj = await stripe.prices.retrieve(priceId);
+        const unitAmount = priceObj.unit_amount || 0;
+        const taxCalc = await (stripe as any).tax.calculations.create({
+          currency: (priceObj.currency || 'usd').toLowerCase(),
+          line_items: [{ amount: unitAmount, reference: 'subscription', tax_code: 'txcd_10000000' }],
+          customer_details: { address: { country: billingCountry }, address_source: 'billing' },
+        });
+        taxInfo = { total_cents: taxCalc.amount_total, tax_cents: taxCalc.tax_amount_exclusive, subtotal_cents: unitAmount };
+      }
+    } catch (e) { /* Non-critical */ }
+
+    const paymentDetails = {
+      client_secret: setupResult.client_secret,
+      setup_intent_id: setupResult.setup_intent_id,
+      payment_element: true,
+      has_trial: eligibleForTrial,
+      hasTrial: eligibleForTrial,
+      is_setup_intent: true,
+      ...taxInfo
+    };
 
     // SECURITY FIX: Do NOT update plan before payment confirmation
     // The plan will only be upgraded when the webhook confirms payment success
@@ -1147,11 +1099,97 @@ export class UnifiedBillingService {
 
     return {
       success: true,
-      message: 'Embedded checkout session created for new subscription',
+      message: 'Payment Element session created for new subscription',
+      details: paymentDetails
+    };
+  }
+
+  /**
+   * First addon purchase for a free user — creates an addon-only Stripe subscription
+   * (no base plan price, plan_id stays 'free').
+   * Uses the same SetupIntent / Payment Element flow as a regular new subscription.
+   */
+  private async executeFirstAddonSubscription(
+    userId: string,
+    _currentState: SubscriptionState,
+    request: BillingChangeRequest
+  ): Promise<{ success: boolean; message: string; details?: any }> {
+    const billingCycle = request.billing_cycle || 'monthly';
+    const addons = request.addons || {};
+    const additionalProjects = addons.additional_projects || 0;
+    const additionalCollaborators = addons.additional_collaborators || 0;
+
+    if (additionalProjects === 0 && additionalCollaborators === 0) {
+      throw new Error('At least one addon (project or collaborator) is required');
+    }
+
+    // Primary price ID used for SetupIntent and tax estimation
+    const primaryPriceId = getAddonStripePriceId('projects', billingCycle) || getAddonStripePriceId('collaborators', billingCycle);
+    if (!primaryPriceId) {
+      throw new Error(`Stripe addon price ID not configured for ${billingCycle} billing`);
+    }
+
+    // Build the items that will be passed to createSubscriptionAfterSetupIntent
+    const subscriptionItems: Array<{ priceId: string; quantity: number }> = [];
+    if (additionalProjects > 0) {
+      const pid = getAddonStripePriceId('projects', billingCycle);
+      if (!pid) throw new Error(`Stripe project addon price not configured for ${billingCycle}`);
+      subscriptionItems.push({ priceId: pid, quantity: additionalProjects });
+    }
+    if (additionalCollaborators > 0) {
+      const pid = getAddonStripePriceId('collaborators', billingCycle);
+      if (!pid) throw new Error(`Stripe collaborator addon price not configured for ${billingCycle}`);
+      subscriptionItems.push({ priceId: pid, quantity: additionalCollaborators });
+    }
+
+    // No trial for addon-only subscriptions — charge immediately.
+    const metadata: Record<string, string> = {
+      plan_id: 'free',
+      billing_cycle: billingCycle,
+      additional_projects: String(additionalProjects),
+      additional_collaborators: String(additionalCollaborators),
+      // Serialise items for verify-payment to build the multi-item subscription
+      subscription_items: JSON.stringify(subscriptionItems),
+    };
+
+    const eligibleForTrial = false; // No trial for addon-only subscriptions
+    const setupResult = await stripeService.createSetupIntent(userId, primaryPriceId, eligibleForTrial, metadata);
+
+    // Estimate tax for display
+    let taxInfo: { total_cents?: number; tax_cents?: number; subtotal_cents?: number } = {};
+    try {
+      const addonUnitCents = Math.round(EXPANSION_PRICING.additionalProjects.pricePerProject * 100);
+      const totalUnits = additionalProjects + additionalCollaborators;
+      const subtotalCents = addonUnitCents * totalUnits;
+      const billingCountry = await this.getBillingCountry(userId);
+      if (billingCountry) {
+        const taxCalc = await (stripe as any).tax.calculations.create({
+          currency: 'usd',
+          line_items: [{ amount: subtotalCents, reference: 'addon', tax_code: 'txcd_10000000' }],
+          customer_details: { address: { country: billingCountry }, address_source: 'billing' },
+        });
+        taxInfo = { total_cents: taxCalc.amount_total, tax_cents: taxCalc.tax_amount_exclusive, subtotal_cents: subtotalCents };
+      }
+    } catch (e) { /* Non-critical */ }
+
+    // Pending state — plan stays free until payment confirmed by webhook
+    await this.updateLocalSubscriptionState(userId, {
+      plan_id: 'free',
+      subscription_status: 'incomplete',
+      addons: { additional_projects: 0, additional_collaborators: 0 }
+    });
+
+    return {
+      success: true,
+      message: 'Payment Element session created for addon subscription',
       details: {
-        session_id: session.id,
-        client_secret: session.client_secret,
-        embedded: true
+        client_secret: setupResult.client_secret,
+        setup_intent_id: setupResult.setup_intent_id,
+        payment_element: true,
+        has_trial: false,
+        hasTrial: false,
+        is_setup_intent: true,
+        ...taxInfo
       }
     };
   }
@@ -1224,7 +1262,8 @@ export class UnifiedBillingService {
     const updatedSubscription = await stripe.subscriptions.update(currentState.stripe_subscription_id!, {
       items: items,
       proration_behavior: 'create_prorations',
-      billing_cycle_anchor: 'now' // Force immediate billing for upgrades
+      billing_cycle_anchor: 'now', // Force immediate billing for upgrades
+      automatic_tax: { enabled: true }
     });
 
     // For upgrades, create and finalize invoice immediately to charge the user now
@@ -1232,7 +1271,8 @@ export class UnifiedBillingService {
       const pendingInvoice = await stripe.invoices.create({
         customer: currentState.stripe_customer_id!,
         subscription: updatedSubscription.id,
-        collection_method: 'charge_automatically'
+        collection_method: 'charge_automatically',
+        automatic_tax: { enabled: true }
       });
 
       // Finalize the invoice to charge immediately
@@ -1265,9 +1305,96 @@ export class UnifiedBillingService {
 
   private async executeAddonChange(userId: string, currentState: SubscriptionState, request: BillingChangeRequest): Promise<{ success: boolean; message: string; details?: any }> {
 
-    // NEW MODEL VALIDATION: Only allow addon changes for paid plans
-    if (currentState.plan_id === 'free') {
-      throw new Error('Cannot modify addons. User must subscribe to Pro plan first. Use type "new" with target_plan "paid".');
+    // Free user with no subscription — first addon purchase creates the subscription.
+    // But first, check Stripe directly: the DB might be stale if the user paid twice
+    // (e.g. toggled billing cycle and clicked Confirm more than once). If an active
+    // subscription already exists in Stripe, sync it to the DB and update it instead
+    // of creating another one.
+    if (!currentState.stripe_subscription_id) {
+      if (currentState.stripe_customer_id) {
+        const existingSubs = await stripe.subscriptions.list({
+          customer: currentState.stripe_customer_id,
+          status: 'active',
+          limit: 10
+        });
+        const existingActiveSub = existingSubs.data.find(
+          (sub: any) => sub.metadata?.user_id === userId
+        );
+        if (existingActiveSub) {
+          if (DEBUG_AI) console.log(`⚠️ executeAddonChange: DB has no subscription but Stripe has active sub ${existingActiveSub.id} — syncing and updating`);
+          const billingCycle = await this.detectBillingCycle(existingActiveSub.id);
+          // Read addon counts from subscription metadata (set by executeFirstAddonSubscription/verify-payment)
+          const existingProjects = parseInt((existingActiveSub as any).metadata?.additional_projects || '0');
+          const existingCollaborators = parseInt((existingActiveSub as any).metadata?.additional_collaborators || '0');
+          await this.updateLocalSubscriptionState(userId, {
+            plan_id: (existingActiveSub as any).metadata?.plan_id || 'free',
+            subscription_status: 'active',
+            stripe_subscription_id: existingActiveSub.id,
+            stripe_customer_id: currentState.stripe_customer_id,
+            addons: { additional_projects: existingProjects, additional_collaborators: existingCollaborators }
+          });
+          // Re-run with the recovered subscription ID
+          return await this.executeAddonChange(userId, {
+            ...currentState,
+            stripe_subscription_id: existingActiveSub.id,
+            subscription_status: 'active'
+          }, request);
+        }
+      }
+      return await this.executeFirstAddonSubscription(userId, currentState, request);
+    }
+
+    // Verify the Stripe subscription is actually usable for addon changes.
+    // The DB may hold a stale subscription_id from a cancelled/expired/legacy subscription.
+    try {
+      const existingSub = await stripe.subscriptions.retrieve(currentState.stripe_subscription_id);
+      const needsReset = existingSub.status === 'canceled' || existingSub.status === 'incomplete_expired';
+
+      // Also reset if the subscription belongs to a legacy 'paid' plan (old pricing model).
+      // These subscriptions have a base plan item that can't be modified for addon-only billing.
+      const hasLegacyBasePlan = !needsReset && existingSub.items.data.some(item => {
+        const priceId = item.price.id;
+        return priceId === currentPriceIds.paid_monthly || priceId === currentPriceIds.paid_yearly;
+      });
+
+      if (needsReset || hasLegacyBasePlan) {
+        if (DEBUG_AI) console.log(`⚠️ Stripe subscription ${currentState.stripe_subscription_id} is ${needsReset ? existingSub.status : 'legacy paid plan'}, resetting to fresh addon flow`);
+
+        // Cancel the old subscription in Stripe if it's still active
+        if (!needsReset && (existingSub.status === 'active' || existingSub.status === 'trialing' || existingSub.status === 'past_due')) {
+          try {
+            await stripe.subscriptions.cancel(currentState.stripe_subscription_id);
+          } catch (cancelErr: any) {
+            console.error('⚠️ Error cancelling legacy subscription (non-critical):', cancelErr.message);
+          }
+        }
+
+        // Reset local state so executeFirstAddonSubscription can start fresh
+        await this.updateLocalSubscriptionState(userId, {
+          plan_id: 'free',
+          subscription_status: 'free',
+          stripe_subscription_id: null,
+          stripe_customer_id: currentState.stripe_customer_id,
+          addons: { additional_projects: 0, additional_collaborators: 0 }
+        });
+
+        return await this.executeFirstAddonSubscription(userId, { ...currentState, stripe_subscription_id: null as any }, request);
+      }
+    } catch (stripeError: any) {
+      // Subscription doesn't exist in Stripe at all
+      if (stripeError.code === 'resource_missing') {
+        if (DEBUG_AI) console.log(`⚠️ Stripe subscription ${currentState.stripe_subscription_id} not found, treating as no subscription`);
+        await this.updateLocalSubscriptionState(userId, {
+          plan_id: 'free',
+          subscription_status: 'free',
+          stripe_subscription_id: null,
+          stripe_customer_id: currentState.stripe_customer_id,
+          addons: { additional_projects: 0, additional_collaborators: 0 }
+        });
+
+        return await this.executeFirstAddonSubscription(userId, { ...currentState, stripe_subscription_id: null as any }, request);
+      }
+      throw stripeError;
     }
 
     // Block addon additions if subscription is set to cancel
@@ -1276,6 +1403,32 @@ export class UnifiedBillingService {
         (request.addons?.additional_collaborators ?? 0) > (currentState.additional_collaborators || 0);
       if (hasNewAddons) {
         throw new Error('Cannot add addons while subscription is set to cancel. Reactivate your subscription first.');
+      }
+    }
+
+    // Cap addons during trial to prevent abuse
+    const TRIAL_MAX_ADDITIONAL_PROJECTS = 1;
+    const TRIAL_MAX_ADDITIONAL_COLLABORATORS = 5;
+    if (currentState.subscription_status === 'trialing') {
+      const requestedProjects = request.addons?.additional_projects ?? currentState.additional_projects;
+      const requestedCollaborators = request.addons?.additional_collaborators ?? currentState.additional_collaborators;
+      if (requestedProjects > TRIAL_MAX_ADDITIONAL_PROJECTS) {
+        throw new Error(JSON.stringify({
+          error: 'trial_addon_limit',
+          error_type: 'trial_addon_projects_limit',
+          message_en: `During your free trial you can add up to ${TRIAL_MAX_ADDITIONAL_PROJECTS} extra project. Upgrade to add more.`,
+          message_es: `Durante la prueba gratuita puedes agregar hasta ${TRIAL_MAX_ADDITIONAL_PROJECTS} proyecto extra. Suscribete para agregar mas.`,
+          max: TRIAL_MAX_ADDITIONAL_PROJECTS
+        }));
+      }
+      if (requestedCollaborators > TRIAL_MAX_ADDITIONAL_COLLABORATORS) {
+        throw new Error(JSON.stringify({
+          error: 'trial_addon_limit',
+          error_type: 'trial_addon_collaborators_limit',
+          message_en: `During your free trial you can add up to ${TRIAL_MAX_ADDITIONAL_COLLABORATORS} extra collaborators. Upgrade to add more.`,
+          message_es: `Durante la prueba gratuita puedes agregar hasta ${TRIAL_MAX_ADDITIONAL_COLLABORATORS} colaboradores extra. Suscribete para agregar mas.`,
+          max: TRIAL_MAX_ADDITIONAL_COLLABORATORS
+        }));
       }
     }
 
@@ -1288,7 +1441,8 @@ export class UnifiedBillingService {
         if (b.code === 'addon_reduction_projects_exceed_limit') {
           return `You have ${b.params.current} active projects but reducing addons would only allow ${b.params.newLimit}. Please archive or delete ${b.params.excess} project(s) first.`;
         } else if (b.code === 'addon_reduction_collaborators_exceed_limit') {
-          return `You have ${b.params.current} collaborators but reducing addons would only allow ${b.params.newLimit}. Please remove ${b.params.excess} collaborator(s) first.`;
+          const collabWord = b.params.current === 1 ? 'collaborator' : 'collaborators';
+          return `You have ${b.params.current} active ${collabWord} on your project${b.params.current === 1 ? '' : 's'}. Please remove them before reducing your collaborator add-ons.`;
         }
         return `Usage exceeds new limits`;
       });
@@ -1297,119 +1451,10 @@ export class UnifiedBillingService {
 
     // Detect billing cycle to use correct addon pricing
     const billingCycle = await this.detectBillingCycle(currentState.stripe_subscription_id!);
-    const addonUnitPrice = this.getAddonUnitPrice(billingCycle);
-    const billingLabel = billingCycle === 'yearly' ? 'year' : 'month';
 
-    // Calculate addon cost difference using correct billing cycle pricing
-    const currentAddonCosts = this.calculateCurrentAddonCosts(currentState.plan_id, currentState, billingCycle);
-    const newAddonCosts = this.calculateAddonCosts(currentState.plan_id, newAddons, billingCycle);
-    const addonCostDifference = newAddonCosts.total - currentAddonCosts.total;
-
-    // HYBRID SYSTEM: Handle immediate prorated charges for addon additions
-    if (addonCostDifference > 0) {
-      try {
-        // Calculate prorated charge for current billing period
-        const proratedCharge = await this.calculateAddonProratedCharge(
-          currentState.stripe_subscription_id!,
-          addonCostDifference
-        );
-
-        if (proratedCharge > 0) {
-
-          // Get the payment method from the subscription
-          const subscription = await stripe.subscriptions.retrieve(currentState.stripe_subscription_id!);
-          const defaultPaymentMethod = subscription.default_payment_method as string | null;
-
-          if (!defaultPaymentMethod) {
-            console.error('❌ No payment method found on subscription');
-            throw new Error('No payment method available. Please update your payment method in billing settings.');
-          }
-
-          // Create invoice items for the prorated addon charge
-          const invoiceItems: Array<{ description: string; amount: number; quantity: number }> = [];
-
-          if (newAddons.additional_projects > (currentState.additional_projects || 0)) {
-            const projectIncrease = newAddons.additional_projects - (currentState.additional_projects || 0);
-            const projectProratedCharge = await this.calculateAddonProratedCharge(
-              currentState.stripe_subscription_id!,
-              projectIncrease * addonUnitPrice
-            );
-            if (projectProratedCharge > 0) {
-              invoiceItems.push({
-                description: `Additional Projects (${projectIncrease} × €${addonUnitPrice}/${billingLabel}, prorated)`,
-                amount: Math.round(projectProratedCharge * 100),
-                quantity: 1
-              });
-            }
-          }
-
-          if (newAddons.additional_collaborators > (currentState.additional_collaborators || 0)) {
-            const collaboratorIncrease = newAddons.additional_collaborators - (currentState.additional_collaborators || 0);
-            const collaboratorProratedCharge = await this.calculateAddonProratedCharge(
-              currentState.stripe_subscription_id!,
-              collaboratorIncrease * addonUnitPrice
-            );
-            if (collaboratorProratedCharge > 0) {
-              invoiceItems.push({
-                description: `Additional Collaborators (${collaboratorIncrease} × €${addonUnitPrice}/${billingLabel}, prorated)`,
-                amount: Math.round(collaboratorProratedCharge * 100),
-                quantity: 1
-              });
-            }
-          }
-
-          // Create invoice first (draft status) with payment method
-          const invoice = await stripe.invoices.create({
-            customer: currentState.stripe_customer_id!,
-            collection_method: 'charge_automatically',
-            default_payment_method: defaultPaymentMethod,
-            description: `Prorated addon charge (${billingCycle}): ${newAddons.additional_projects} additional projects, ${newAddons.additional_collaborators} additional collaborators`,
-            metadata: {
-              user_id: userId,
-              subscription_id: currentState.stripe_subscription_id!,
-              charge_type: 'addon_prorated_charge',
-              billing_cycle: billingCycle,
-              full_period_cost: addonCostDifference.toString(),
-              prorated_amount: proratedCharge.toString()
-            }
-          });
-
-          // Add invoice items to the draft invoice
-          for (const item of invoiceItems) {
-            await stripe.invoiceItems.create({
-              customer: currentState.stripe_customer_id!,
-              invoice: invoice.id,
-              amount: item.amount,
-              currency: 'eur',
-              description: item.description,
-              metadata: {
-                user_id: userId,
-                subscription_id: currentState.stripe_subscription_id!,
-                charge_type: 'addon_prorated_charge',
-                billing_cycle: billingCycle,
-                additional_projects: newAddons.additional_projects.toString(),
-                additional_collaborators: newAddons.additional_collaborators.toString()
-              }
-            });
-          }
-
-          // Finalize the invoice
-          const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id);
-
-          // Only pay if not already paid (auto-collection may have already charged it)
-          if (finalizedInvoice.status !== 'paid') {
-            await stripe.invoices.pay(finalizedInvoice.id);
-          }
-        }
-
-      } catch (chargeError: any) {
-        console.error('❌ Error creating prorated charge for addon addition:', chargeError.message);
-        throw new Error(`Failed to charge for addon addition: ${chargeError.message}`);
-      }
-    }
-    // No refund/credit for addon removal (monthly or yearly).
-    // The user paid for the current period and the addon is simply removed
-    // from recurring billing so it won't charge on the next cycle.
+    // Sync addon items. Additions use proration_behavior: 'always_invoice' so Stripe
+    // creates and immediately charges a prorated invoice for the remaining billing period.
+    // Removals use proration_behavior: 'none' — savings start on the next billing cycle.
 
     await this.syncAddonSubscriptionItems(
       currentState.stripe_subscription_id!,
@@ -1418,26 +1463,39 @@ export class UnifiedBillingService {
       billingCycle
     );
 
+    // Fetch fresh subscription from Stripe to persist current period dates
+    let periodStart: string | null = null;
+    let periodEnd: string | null = null;
+    try {
+      const freshSub = await stripe.subscriptions.retrieve(currentState.stripe_subscription_id!);
+      const freshPeriodStart = getSubPeriodStart(freshSub);
+      const freshPeriodEnd = getSubPeriodEnd(freshSub);
+      if (freshPeriodStart) {
+        periodStart = new Date(freshPeriodStart * 1000).toISOString();
+      }
+      if (freshPeriodEnd) {
+        periodEnd = new Date(freshPeriodEnd * 1000).toISOString();
+      }
+    } catch (e) {
+      console.warn('⚠️ Could not fetch period dates after addon sync:', e);
+    }
+
     await this.updateLocalSubscriptionState(userId, {
       plan_id: currentState.plan_id,
       subscription_status: currentState.subscription_status,
-      addons: newAddons
+      addons: newAddons,
+      current_period_start: periodStart,
+      current_period_end: periodEnd
     });
 
     return {
       success: true,
-      message: addonCostDifference > 0
-        ? `Addons added successfully. Charged prorated amount for current billing period, recurring billing set up (${billingCycle}).`
-        : addonCostDifference < 0
-          ? `Addons removed successfully. Change takes effect on next billing cycle.`
-          : `Addon settings updated successfully`,
+      message: 'Addon settings updated. Changes billed on your next billing cycle.',
       details: {
         addon_change: true,
         additional_projects: newAddons.additional_projects,
         additional_collaborators: newAddons.additional_collaborators,
-        cost_difference: addonCostDifference,
-        billing_cycle: billingCycle,
-        billing_method: 'hybrid_prorated_and_recurring'
+        billing_cycle: billingCycle
       }
     };
   }
@@ -1448,21 +1506,7 @@ export class UnifiedBillingService {
       throw new Error('Cannot cancel subscription. User is already on free plan.');
     }
 
-    // CRITICAL: Re-validate cancellation eligibility before execution
-    const usageCheck = await this.validateCancellationEligibility(userId);
-
-    if (!usageCheck.canCancel) {
-      throw new Error(`Cancellation blocked: ${usageCheck.blockers.join('; ')}`);
-    }
-
-    // Handle collaborator cleanup if auto-removal was requested
-    const autoRemoveCollaborators = request?.immediate_cancellation || false; // Using this flag for auto-removal
-
-    if (autoRemoveCollaborators && usageCheck.cleanupRequired.collaboratorsToRemove > 0) {
-      await this.removeAllCollaborators(userId);
-    }
-
-    // Cancel subscription at period end (not immediately)
+    // Cancel subscription at period end - user keeps full access until then
     if (currentState.stripe_subscription_id) {
 
       const updatedSubscription = await stripe.subscriptions.update(currentState.stripe_subscription_id, {
@@ -1515,8 +1559,7 @@ export class UnifiedBillingService {
         message: `Subscription will cancel at period end (${periodEnd.toLocaleDateString()}). You can continue using all features until then.`,
         details: {
           period_end: periodEnd.toISOString(),
-          immediate_cancellation: false,
-          collaborators_removed: autoRemoveCollaborators ? usageCheck.cleanupRequired.collaboratorsToRemove : 0
+          immediate_cancellation: false
         }
       };
     }
@@ -1617,7 +1660,7 @@ export class UnifiedBillingService {
     });
 
     const message = actualRefundIssued > 0
-      ? `Successfully downgraded to ${newPlan.name}. Your €${actualRefundIssued.toFixed(2)} refund will be processed within 3-5 business days.`
+      ? `Successfully downgraded to ${newPlan.name}. Your $${actualRefundIssued.toFixed(2)} refund will be processed within 3-5 business days.`
       : `Successfully downgraded to ${newPlan.name}.`;
 
     return {
@@ -1641,7 +1684,7 @@ export class UnifiedBillingService {
       try {
         const customer = await stripe.customers.retrieve(currentState.stripe_customer_id);
         if ('balance' in customer && customer.balance) {
-          existingBalance = Math.abs(customer.balance) / 100; // Convert from cents to euros, make positive
+          existingBalance = Math.abs(customer.balance) / 100; // Convert from cents to dollars, make positive
         }
       } catch (balanceError) {
         console.warn('⚠️ Could not retrieve customer balance:', balanceError);
@@ -1658,10 +1701,10 @@ export class UnifiedBillingService {
 
       // Extract refund amount from preview (negative charge means refund)
       if (preview.cost_breakdown.total_immediate_charge < 0) {
-        refundAmount = Math.abs(preview.cost_breakdown.total_immediate_charge / 100); // Convert from cents to euros
+        refundAmount = Math.abs(preview.cost_breakdown.total_immediate_charge / 100); // Convert from cents to dollars
       } else if (preview.proration_details?.estimated_credit) {
         // Fallback: use proration details if available
-        refundAmount = preview.proration_details.estimated_credit / 100; // Convert from cents to euros
+        refundAmount = preview.proration_details.estimated_credit / 100; // Convert from cents to dollars
       } else {
 
         // Method 2: Direct calculation if preview fails
@@ -1669,8 +1712,8 @@ export class UnifiedBillingService {
           try {
             const subscription = await stripe.subscriptions.retrieve(currentState.stripe_subscription_id);
             const now = new Date();
-            const currentPeriodEnd = new Date((subscription as any).current_period_end * 1000);
-            const currentPeriodStart = new Date((subscription as any).current_period_start * 1000);
+            const currentPeriodEnd = new Date((getSubPeriodEnd(subscription) ?? subscription.created) * 1000);
+            const currentPeriodStart = new Date((getSubPeriodStart(subscription) ?? subscription.created) * 1000);
 
             // Calculate remaining time
             const totalPeriodMs = currentPeriodEnd.getTime() - currentPeriodStart.getTime();
@@ -1813,9 +1856,9 @@ export class UnifiedBillingService {
     }
 
     const message = actualRefundIssued > 0
-      ? `Successfully downgraded to free plan. Your €${actualRefundIssued.toFixed(2)} refund will be processed within 3-5 business days.`
+      ? `Successfully downgraded to free plan. Your $${actualRefundIssued.toFixed(2)} refund will be processed within 3-5 business days.`
       : totalRefundAmount > 0
-        ? `Successfully downgraded to free plan. Your €${totalRefundAmount.toFixed(2)} refund will be processed within 3-5 business days.`
+        ? `Successfully downgraded to free plan. Your $${totalRefundAmount.toFixed(2)} refund will be processed within 3-5 business days.`
         : `Successfully downgraded to free plan.`;
 
     return {
@@ -1841,16 +1884,12 @@ export class UnifiedBillingService {
         expand: ['items.data.price']
       });
 
-      // Find the base plan item (not addon items)
-      const basePriceItem = subscription.items.data.find(item => {
-        const priceId = item.price.id;
-        return priceId === currentPriceIds.paid_monthly || priceId === currentPriceIds.paid_yearly;
-      });
+      // Check if any item has a yearly interval (works with both catalog and inline prices)
+      const hasYearlyItem = subscription.items.data.some(item =>
+        item.price.recurring?.interval === 'year'
+      );
 
-      if (basePriceItem?.price.recurring?.interval === 'year') {
-        return 'yearly';
-      }
-      return 'monthly';
+      return hasYearlyItem ? 'yearly' : 'monthly';
     } catch (error) {
       console.error('❌ Error detecting billing cycle:', error);
       return 'monthly'; // Safe fallback
@@ -1859,7 +1898,7 @@ export class UnifiedBillingService {
 
   /**
    * Get the per-unit addon price for the given billing cycle.
-   * Monthly: €4/unit/month, Yearly: €40/unit/year
+   * Monthly: $3/unit/month, Yearly: $30/unit/year
    */
   private getAddonUnitPrice(billingCycle: 'monthly' | 'yearly'): number {
     return getAddonPriceForPlan('paid', 'additional_projects', billingCycle);
@@ -1872,27 +1911,22 @@ export class UnifiedBillingService {
     return Math.round(this.getAddonUnitPrice(billingCycle) * 100);
   }
 
-  private calculateAddonCosts(planId: string, addons: { additional_projects?: number; additional_collaborators?: number }, billingCycle: 'monthly' | 'yearly' = 'monthly'): { projects: number; collaborators: number; total: number } {
-    const plan = getPlanById(planId);
-    if (!plan?.addons) {
-      return { projects: 0, collaborators: 0, total: 0 };
-    }
-
-    // Ensure we have valid numbers (prevent NaN)
+  private calculateAddonCosts(_planId: string, addons: { additional_projects?: number; additional_collaborators?: number }, billingCycle: 'monthly' | 'yearly' = 'monthly'): { projects: number; collaborators: number; total: number } {
+    // Addon pricing always comes from EXPANSION_PRICING — plans don't carry addon config.
     const projectsCount = Math.max(0, addons.additional_projects || 0);
     const collaboratorsCount = Math.max(0, addons.additional_collaborators || 0);
 
-    const projectsCost = plan.addons.additionalProjects?.enabled
-      ? projectsCount * getAddonPriceForPlan(planId, 'additional_projects', billingCycle)
-      : 0;
+    const projectUnitPrice = billingCycle === 'yearly'
+      ? EXPANSION_PRICING.additionalProjects.yearlyPricePerProject
+      : EXPANSION_PRICING.additionalProjects.pricePerProject;
 
-    const collaboratorsCost = plan.addons.additionalCollaborators?.enabled
-      ? collaboratorsCount * getAddonPriceForPlan(planId, 'additional_collaborators', billingCycle)
-      : 0;
+    const collaboratorUnitPrice = billingCycle === 'yearly'
+      ? EXPANSION_PRICING.additionalCollaborators.yearlyPricePerCollaborator
+      : EXPANSION_PRICING.additionalCollaborators.pricePerCollaborator;
 
-    // Note: AI credits are now one-time purchases via /api/ai-credits/purchase (not subscription addons)
+    const projectsCost = EXPANSION_PRICING.additionalProjects.enabled ? projectsCount * projectUnitPrice : 0;
+    const collaboratorsCost = EXPANSION_PRICING.additionalCollaborators.enabled ? collaboratorsCount * collaboratorUnitPrice : 0;
 
-    // Ensure we return valid numbers
     const finalProjectsCost = Number(projectsCost.toFixed(2));
     const finalCollaboratorsCost = Number(collaboratorsCost.toFixed(2));
 
@@ -2067,10 +2101,15 @@ export class UnifiedBillingService {
   }
 
   private getSubscriptionPeriodEnd(subscription: Stripe.Subscription): Date {
-    const periodEndTimestamp = (subscription as any).current_period_end;
-    return periodEndTimestamp
-      ? new Date(periodEndTimestamp * 1000)
-      : new Date(subscription.created * 1000 + (30 * 24 * 60 * 60 * 1000));
+    // Use the typed SDK field directly — (as any) cast was silently returning undefined
+    const periodEnd = getSubPeriodEnd(subscription);
+    if (periodEnd) {
+      return new Date(periodEnd * 1000);
+    }
+    // Fallback: detect interval from subscription items so yearly subs get 365 days
+    const interval = subscription.items?.data?.[0]?.price?.recurring?.interval;
+    const daysToAdd = interval === 'year' ? 365 : 30;
+    return new Date(subscription.created * 1000 + (daysToAdd * 24 * 60 * 60 * 1000));
   }
 
   private generateChangeSummary(changeType: string, currentPlan: any, targetPlan: any, netChange: number, currentPeriodEnd: string | null): string {
@@ -2078,21 +2117,21 @@ export class UnifiedBillingService {
 
     if (changeType === 'downgrade_to_free') {
       return netChange < 0
-        ? `Downgrade to Free: €${Math.abs(netChange).toFixed(2)} credit will be applied to future invoices, access until ${periodEndDate}`
+        ? `Downgrade to Free: $${Math.abs(netChange).toFixed(2)} credit will be applied to future invoices, access until ${periodEndDate}`
         : `Downgrade to Free: No refund due, access until ${periodEndDate}`;
     }
 
     if (changeType === 'upgrade') {
-      return `Upgrade to ${targetPlan.name}: €${Math.abs(netChange).toFixed(2)} charged now (includes refund + full month), then €${targetPlan.price}/month from ${periodEndDate}`;
+      return `Upgrade to ${targetPlan.name}: $${Math.abs(netChange).toFixed(2)} charged now (includes refund + full month), then $${targetPlan.price}/month from ${periodEndDate}`;
     }
 
     if (changeType === 'downgrade') {
       return netChange < 0
-        ? `Downgrade to ${targetPlan.name}: €${Math.abs(netChange).toFixed(2)} refund will be processed within 3-5 business days, then €${targetPlan.price}/month from ${periodEndDate}`
-        : `Downgrade to ${targetPlan.name}: €${netChange.toFixed(2)} charged now (includes refund + full month), then €${targetPlan.price}/month from ${periodEndDate}`;
+        ? `Downgrade to ${targetPlan.name}: $${Math.abs(netChange).toFixed(2)} refund will be processed within 3-5 business days, then $${targetPlan.price}/month from ${periodEndDate}`
+        : `Downgrade to ${targetPlan.name}: $${netChange.toFixed(2)} charged now (includes refund + full month), then $${targetPlan.price}/month from ${periodEndDate}`;
     }
 
-    return `Plan change to ${targetPlan.name}: €${Math.abs(netChange).toFixed(2)} ${netChange >= 0 ? 'charged' : 'refunded'}`;
+    return `Plan change to ${targetPlan.name}: $${Math.abs(netChange).toFixed(2)} ${netChange >= 0 ? 'charged' : 'refunded'}`;
   }
 
   private generateStripePoweredSummary(changeType: string, currentPlan: any, targetPlan: any, immediateCharge: number, currentPeriodEnd: string, isDowngrade: boolean = false): string {
@@ -2103,13 +2142,13 @@ export class UnifiedBillingService {
     }
 
     if (immediateCharge > 0) {
-      return `Upgrade to ${targetPlan.name}: €${immediateCharge.toFixed(2)} charged now (includes refund + full month), then €${targetPlan.price}/month from ${periodEndDate}`;
+      return `Upgrade to ${targetPlan.name}: $${immediateCharge.toFixed(2)} charged now (includes refund + full month), then $${targetPlan.price}/month from ${periodEndDate}`;
     } else if (immediateCharge < 0) {
       return isDowngrade
-        ? `Downgrade to ${targetPlan.name}: €${Math.abs(immediateCharge).toFixed(2)} refund will be processed within 3-5 business days, then €${targetPlan.price}/month from ${periodEndDate}`
-        : `Downgrade to ${targetPlan.name}: €${Math.abs(immediateCharge).toFixed(2)} credit will be applied to future invoices, then €${targetPlan.price}/month from ${periodEndDate}`;
+        ? `Downgrade to ${targetPlan.name}: $${Math.abs(immediateCharge).toFixed(2)} refund will be processed within 3-5 business days, then $${targetPlan.price}/month from ${periodEndDate}`
+        : `Downgrade to ${targetPlan.name}: $${Math.abs(immediateCharge).toFixed(2)} credit will be applied to future invoices, then $${targetPlan.price}/month from ${periodEndDate}`;
     } else {
-      return `Change to ${targetPlan.name}: No immediate charge, €${targetPlan.price}/month from ${periodEndDate}`;
+      return `Change to ${targetPlan.name}: No immediate charge, $${targetPlan.price}/month from ${periodEndDate}`;
     }
   }
 
@@ -2137,7 +2176,7 @@ export class UnifiedBillingService {
     let daysRemaining = 0;
     if (billingDates.current_period_end) {
       const currentPeriodEnd = new Date(billingDates.current_period_end);
-      const periodStartTimestamp = (subscription as any).current_period_start;
+      const periodStartTimestamp = getSubPeriodStart(subscription);
 
       if (periodStartTimestamp) {
         const currentPeriodStart = new Date(periodStartTimestamp * 1000);
@@ -2181,7 +2220,7 @@ export class UnifiedBillingService {
         addon_costs: Math.round(safeAddonTotal * 100), // cents
         total_immediate_charge: Math.round(this.roundCustomerFriendly(safeNetChange, safeNetChange < 0) * 100), // cents (can be negative for refunds)
         next_billing_amount: request.target_plan === 'free' ? 0 : Math.round((safeTargetPrice + safeAddonTotal) * 100), // cents
-        currency: 'eur'
+        currency: 'usd'
       },
       proration_details: daysRemaining > 0 ? {
         days_remaining: daysRemaining,
@@ -2202,6 +2241,8 @@ export class UnifiedBillingService {
     stripe_plan_price_id?: string | null;
     cancel_at_period_end?: boolean;
     addons?: { additional_projects?: number; additional_collaborators?: number };
+    current_period_start?: string | null;
+    current_period_end?: string | null;
   }): Promise<void> {
     // Update users table - stripe IDs for quick lookup
     const userUpdate: any = {
@@ -2252,24 +2293,29 @@ export class UnifiedBillingService {
       // Note: AI credits are now one-time purchases via /api/ai-credits/purchase (not subscription addons)
     }
 
+    if (update.current_period_start !== undefined) {
+      subscriptionUpdate.current_period_start = update.current_period_start;
+    }
+
+    if (update.current_period_end !== undefined) {
+      subscriptionUpdate.current_period_end = update.current_period_end;
+    }
+
     // First, mark all existing active subscriptions as inactive ONLY if creating a NEW subscription
     // (different stripe_subscription_id than current)
     if (update.subscription_status === 'active' && update.stripe_subscription_id) {
       // Check if this is a different subscription ID
-      const { data: currentSub } = await supabase
-        .from('user_subscriptions')
-        .select('stripe_subscription_id')
-        .eq('user_id', userId)
-        .eq('status', 'active')
-        .maybeSingle();
+      const { getSubscriptionRecord } = require('../utils/subscriptionHelpers');
+      const currentSub = await getSubscriptionRecord(supabase, userId);
 
       // Only deactivate if the subscription ID is different (new subscription)
-      if (currentSub && currentSub.stripe_subscription_id !== update.stripe_subscription_id) {
+      if (currentSub.stripe_subscription_id && currentSub.stripe_subscription_id !== update.stripe_subscription_id) {
+        const { isActiveStatus } = require('../utils/subscriptionHelpers');
         await supabase
           .from('user_subscriptions')
           .update({ status: 'inactive', updated_at: getCurrentDate().toISOString() })
           .eq('user_id', userId)
-          .eq('status', 'active');
+          .in('status', ['active', 'trialing']);
       }
     }
 
@@ -2286,12 +2332,12 @@ export class UnifiedBillingService {
     if (error) {
       console.error('❌ Database update error:', error);
 
-      // Fallback: try a direct UPDATE on active subscription only
+      // Fallback: try a direct UPDATE on active/trialing subscription only
       const { data: updateData, error: updateError } = await supabase
         .from('user_subscriptions')
         .update(subscriptionUpdate)
         .eq('user_id', userId)
-        .eq('status', 'active')
+        .in('status', ['active', 'trialing'])
         .order('updated_at', { ascending: false })
         .limit(1);
 
@@ -2319,9 +2365,9 @@ export class UnifiedBillingService {
     targetAddons: { additional_projects: number; additional_collaborators: number },
     billingCycle: 'monthly' | 'yearly' = 'monthly'
   ): Promise<void> {
-    // Get current subscription with items
+    // Get current subscription with items, expand price.product so we can look up by product ID
     const subscription = await stripe.subscriptions.retrieve(subscriptionId, {
-      expand: ['items']
+      expand: ['items.data.price.product']
     });
 
     const currentItems = subscription.items.data;
@@ -2361,46 +2407,70 @@ export class UnifiedBillingService {
     billingCycle: 'monthly' | 'yearly' = 'monthly'
   ): Promise<void> {
     const priceId = getAddonPriceId(planId, addonType, billingCycle);
-    // Also get the opposite billing cycle price ID to detect items that need migration
-    const oppositePriceId = getAddonPriceId(planId, addonType, billingCycle === 'yearly' ? 'monthly' : 'yearly');
+    if (!priceId) return;
 
-    if (!priceId) {
-      return;
-    }
+    // Retrieve the catalog price to get its product ID.
+    // We look up existing items by product ID (not price ID) because previous runs
+    // may have created inline price_data items with a different price ID for the
+    // same product — causing duplicate subscription items if we only match by price ID.
+    const catalogPrice = await stripe.prices.retrieve(priceId);
+    const productId = typeof catalogPrice.product === 'string'
+      ? catalogPrice.product
+      : (catalogPrice.product as any).id;
 
-    // Find existing subscription item for this addon type (check both monthly and yearly price IDs)
-    const existingItem = currentItems.find(item => item.price.id === priceId);
-    const wrongCycleItem = oppositePriceId ? currentItems.find(item => item.price.id === oppositePriceId) : null;
+    // Find any existing item for this product (regardless of which price was used)
+    const existingItem = currentItems.find(item => {
+      const itemProduct = typeof item.price.product === 'string'
+        ? item.price.product
+        : (item.price.product as any)?.id;
+      return itemProduct === productId;
+    });
 
-    // If there's an item with the wrong billing cycle price, remove it first
-    if (wrongCycleItem) {
-      await stripe.subscriptionItems.del(wrongCycleItem.id, {
-        proration_behavior: 'none' // We handle proration separately
-      });
+    // If the existing item was created with a different price (e.g. inline price_data
+    // or wrong billing cycle), replace it atomically to avoid leaving the subscription
+    // with zero items (Stripe rejects that).
+    const hasMismatchedPrice = existingItem && existingItem.price.id !== priceId;
+    if (hasMismatchedPrice) {
+      if (DEBUG_AI) console.log(`🔄 Replacing mismatched addon item ${existingItem!.id} (price ${existingItem!.price.id} → ${priceId})`);
+
+      if (targetQuantity > 0) {
+        // Atomically swap: add new item and remove old one in a single update
+        await stripe.subscriptions.update(subscriptionId, {
+          items: [
+            { id: existingItem!.id, deleted: true },
+            { price: priceId, quantity: targetQuantity },
+          ],
+          proration_behavior: 'none',
+        });
+      } else {
+        // Removing the item entirely — just delete it
+        await stripe.subscriptionItems.del(existingItem!.id, { proration_behavior: 'none' });
+      }
+      return; // Already handled
     }
 
     const currentQuantity = existingItem?.quantity || 0;
 
     if (targetQuantity === 0 && existingItem) {
-      // Remove subscription item (no proration to prevent credits - we handle credits separately)
-      await stripe.subscriptionItems.del(existingItem.id, {
-        proration_behavior: 'none'
-      });
+      // Remove subscription item — no immediate refund, savings start next cycle
+      await stripe.subscriptionItems.del(existingItem.id, { proration_behavior: 'none' });
 
     } else if (targetQuantity > 0 && !existingItem) {
-      // Create new subscription item with correct billing cycle price
+      // Create new subscription item — charge prorated amount immediately
       await stripe.subscriptionItems.create({
         subscription: subscriptionId,
         price: priceId,
         quantity: targetQuantity,
-        proration_behavior: 'none' // No proration - we handle immediate charges separately
+        proration_behavior: 'always_invoice',
       });
 
     } else if (targetQuantity > 0 && existingItem && targetQuantity !== currentQuantity) {
       // Update existing subscription item quantity
+      // Increases are charged immediately (prorated); decreases take effect next cycle
+      const isIncrease = targetQuantity > currentQuantity;
       await stripe.subscriptionItems.update(existingItem.id, {
         quantity: targetQuantity,
-        proration_behavior: 'none' // No proration - we handle immediate charges separately
+        proration_behavior: isIncrease ? 'always_invoice' : 'none',
       });
     }
   }
@@ -2415,6 +2485,12 @@ export class UnifiedBillingService {
     if (addonCostDifference <= 0) return 0;
 
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+
+    // No prorated charge during trial period - addons start billing after trial ends
+    if (subscription.status === 'trialing') {
+      return 0;
+    }
+
     const billingCycle = calculateBillingCycleInfo(subscription);
 
     const proratedCharge = calculateProratedCharge(addonCostDifference, billingCycle);

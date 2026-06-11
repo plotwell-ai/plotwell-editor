@@ -6,9 +6,9 @@
     "allowSyntheticDefaultImports": true,
     "skipLibCheck": true,
     "strict": false,
+    "rootDir": "./src",
     "outDir": "dist",
     "typeRoots": ["./src/types", "./node_modules/@types"],
-    "moduleResolution": "node",
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true
   },
@@ -19,5 +19,6 @@
       "module": "CommonJS"
     }
   },
-  "include": ["src", "src/types"]
+  "include": ["src", "src/types"],
+  "exclude": ["src/__tests__", "**/*.test.ts", "**/*.spec.ts"]
 }

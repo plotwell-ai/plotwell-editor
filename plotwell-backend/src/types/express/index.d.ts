@@ -20,6 +20,7 @@ declare module "express-serve-static-core" {
     collaboratorRole?: string;
     /** Set by AI credits middleware */
     aiCreditsRequired?: number;
+    aiCreditsUsageDescription?: string;
     originalUserId?: string;
     targetUserId?: string;
     /** Set by script/document access middleware */

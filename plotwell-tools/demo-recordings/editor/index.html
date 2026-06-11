@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>plotwell · Video Editor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+    --accent: #f59e0b; --accent2: #3b82f6; --text: #e2e8f0;
+    --muted: #64748b; --danger: #ef4444; --success: #22c55e;
+    --font: 'Inter', system-ui, sans-serif;
+  }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  header h1 { font-size: 14px; font-weight: 600; color: var(--accent); letter-spacing: 0.05em; }
+  header span { color: var(--muted); font-size: 12px; }
+
+  .layout { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Sidebar ─────────────────────────────────────── */
+  #sidebar { width: 200px; border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+  #sidebar h2 { padding: 10px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  #video-list { flex: 1; overflow-y: auto; }
+  .video-item { padding: 8px 12px; font-size: 12px; cursor: pointer; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background 0.1s; }
+  .video-item:hover { background: var(--surface); }
+  .video-item.active { background: #1e293b; color: var(--accent); }
+  .video-size { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Main ────────────────────────────────────────── */
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ── Player ─────────────────────────────────────── */
+  #player-area { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; position: relative; overflow: hidden; min-height: 0; }
+  #player-area video { max-width: 100%; max-height: 100%; }
+  #no-video { color: var(--muted); font-size: 13px; }
+  #playhead-time { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); padding: 3px 8px; border-radius: 4px; font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
+
+  /* ── Timeline ────────────────────────────────────── */
+  #timeline-area { height: 160px; border-top: 1px solid var(--border); background: var(--surface); flex-shrink: 0; display: flex; flex-direction: column; }
+  #tl-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  #tl-toolbar label { font-size: 11px; color: var(--muted); }
+  .tl-btn { padding: 3px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 11px; cursor: pointer; }
+  .tl-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .tl-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
+  #speed-input { width: 52px; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 11px; text-align: center; }
+  #tl-help { margin-left: auto; font-size: 10px; color: var(--muted); }
+
+  #tl-scroll { flex: 1; overflow-x: auto; overflow-y: hidden; position: relative; }
+  #tl-canvas-wrap { position: relative; height: 100%; min-width: 100%; }
+  canvas#tl { display: block; cursor: crosshair; }
+
+  /* ── Right panel ─────────────────────────────────── */
+  #right-panel { width: 220px; border-left: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; }
+  #right-panel h2 { padding: 10px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  #segment-list { flex: 1; overflow-y: auto; }
+  .seg-item { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; cursor: pointer; }
+  .seg-item:hover { background: var(--surface); }
+  .seg-item.selected { background: #1e293b; }
+  .seg-label { display: flex; justify-content: space-between; align-items: center; }
+  .seg-speed { font-weight: 600; font-size: 13px; }
+  .seg-time { color: var(--muted); font-size: 10px; margin-top: 2px; }
+  .seg-del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; }
+  .seg-del:hover { color: var(--danger); }
+
+  /* ── Process bar ─────────────────────────────────── */
+  #process-bar { border-top: 1px solid var(--border); padding: 10px 12px; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  #music-input { flex: 1; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 11px; }
+  #music-input::placeholder { color: var(--muted); }
+  #vol-input { width: 48px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 11px; text-align: center; }
+  #process-btn { padding: 6px 16px; border-radius: 6px; border: none; background: var(--accent); color: #000; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  #process-btn:hover { background: #fbbf24; }
+  #process-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status { font-size: 11px; color: var(--muted); flex: 1; min-width: 0; }
+  #status.ok { color: var(--success); }
+  #status.err { color: var(--danger); }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>plotwell · video editor</h1>
+  <span id="loaded-name">No video loaded</span>
+</header>
+
+<div class="layout">
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <h2>Videos</h2>
+    <div id="video-list"><div style="padding:12px;font-size:12px;color:var(--muted)">Loading…</div></div>
+  </div>
+
+  <!-- Main -->
+  <div id="main">
+
+    <!-- Player -->
+    <div id="player-area">
+      <div id="no-video">← Select a video to start editing</div>
+      <video id="vid" style="display:none" preload="auto"></video>
+      <div id="playhead-time" style="display:none">0:00.000</div>
+    </div>
+
+    <!-- Timeline -->
+    <div id="timeline-area">
+      <div id="tl-toolbar">
+        <button class="tl-btn" id="btn-add">＋ Add segment</button>
+        <button class="tl-btn danger" id="btn-clear">Clear all</button>
+        <label>Speed for new segment:</label>
+        <input id="speed-input" type="number" value="1.5" min="0.25" max="4" step="0.25">
+        <span>×</span>
+        <span id="tl-help">Click on timeline to set segment start · drag edges to resize</span>
+      </div>
+      <div id="tl-scroll">
+        <div id="tl-canvas-wrap">
+          <canvas id="tl"></canvas>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Right panel -->
+  <div id="right-panel">
+    <h2>Segments</h2>
+    <div id="segment-list"><div style="padding:12px;font-size:12px;color:var(--muted)">No segments yet.</div></div>
+    <div id="process-bar">
+      <input id="music-input" type="text" placeholder="assets/music/background.mp3">
+      <input id="vol-input" type="number" value="0.15" min="0" max="1" step="0.05" title="Music volume">
+      <button id="process-btn" disabled>▶ Export</button>
+    </div>
+    <div style="padding:6px 12px 10px;border-top:1px solid var(--border)">
+      <div id="status">Ready.</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+const API = 'http://localhost:4242';
+let currentFile = null;
+let duration = 0;
+let segments = [];   // { id, start, end, speed }
+let selectedSeg = null;
+let dragging = null; // { seg, edge: 'start'|'end'|'move', initX, initStart, initEnd }
+let playheadPos = 0;
+
+const SPEED_COLORS = {
+  0.25: '#8b5cf6', 0.5: '#06b6d4', 0.75: '#22c55e',
+  1.0: '#64748b', 1.25: '#84cc16', 1.5: '#f59e0b',
+  1.75: '#f97316', 2.0: '#ef4444', 3.0: '#dc2626', 4.0: '#991b1b',
+};
+function speedColor(s) {
+  const keys = Object.keys(SPEED_COLORS).map(Number).sort((a,b)=>a-b);
+  let best = keys[0];
+  for (const k of keys) { if (k <= s) best = k; }
+  return SPEED_COLORS[best] ?? '#f59e0b';
+}
+function fmt(s) {
+  const m = Math.floor(s/60), sec = (s%60).toFixed(2).padStart(5,'0');
+  return `${m}:${sec}`;
+}
+let segId = 0;
+
+// ─── DOM refs ─────────────────────────────────────────────────────────────────
+const vid = document.getElementById('vid');
+const tl  = document.getElementById('tl');
+const ctx = tl.getContext('2d');
+const tlScroll = document.getElementById('tl-scroll');
+const phTime = document.getElementById('playhead-time');
+
+// ─── Video list ───────────────────────────────────────────────────────────────
+async function loadVideoList() {
+  const res = await fetch(`${API}/api/videos`).catch(() => null);
+  if (!res?.ok) { document.getElementById('video-list').innerHTML = '<div style="padding:12px;font-size:12px;color:#ef4444">Server not reachable.<br>Run: npm run editor</div>'; return; }
+  const files = await res.json();
+  const el = document.getElementById('video-list');
+  if (!files.length) { el.innerHTML = '<div style="padding:12px;font-size:12px;color:var(--muted)">No videos found in output/videos/</div>'; return; }
+  el.innerHTML = files.map(f => `
+    <div class="video-item" onclick="loadVideo('${f.name}')">
+      ${f.name}
+      <div class="video-size">${(f.size/1024/1024).toFixed(1)} MB</div>
+    </div>`).join('');
+}
+
+async function loadVideo(name) {
+  currentFile = name;
+  segments = [];
+  selectedSeg = null;
+  document.querySelectorAll('.video-item').forEach(el => el.classList.toggle('active', el.textContent.trim().startsWith(name)));
+  document.getElementById('loaded-name').textContent = name;
+  document.getElementById('no-video').style.display = 'none';
+  vid.style.display = 'block';
+  vid.src = `${API}/api/videos/${encodeURIComponent(name)}`;
+  vid.load();
+  phTime.style.display = 'block';
+
+  // Get duration via API
+  const info = await fetch(`${API}/api/videos/${encodeURIComponent(name)}/info`).then(r=>r.json()).catch(()=>null);
+  duration = info?.duration ?? 0;
+  if (!duration) vid.addEventListener('loadedmetadata', () => { duration = vid.duration; resizeTL(); drawTL(); }, { once: true });
+  else { resizeTL(); drawTL(); }
+  document.getElementById('process-btn').disabled = false;
+  renderSegList();
+}
+
+// ─── Timeline canvas ──────────────────────────────────────────────────────────
+const TL_H = 80;
+const TL_PAD_TOP = 22;
+const SEG_H = 36;
+const RULER_H = 18;
+const PX_PER_SEC = 80; // pixels per second
+
+function secToX(s) { return s * PX_PER_SEC; }
+function xToSec(x) { return Math.max(0, Math.min(duration, x / PX_PER_SEC)); }
+
+function resizeTL() {
+  const w = Math.max(tlScroll.clientWidth, secToX(duration) + 60);
+  tl.width = w;
+  tl.height = TL_H + RULER_H;
+  document.getElementById('tl-canvas-wrap').style.width = w + 'px';
+}
+
+function drawTL() {
+  if (!tl.width) return;
+  ctx.clearRect(0, 0, tl.width, tl.height);
+
+  // Background
+  ctx.fillStyle = '#1a1d27';
+  ctx.fillRect(0, 0, tl.width, tl.height);
+
+  // Ruler
+  ctx.fillStyle = '#0f1117';
+  ctx.fillRect(0, 0, tl.width, RULER_H);
+  ctx.fillStyle = '#64748b';
+  ctx.font = '9px monospace';
+  const step = PX_PER_SEC >= 40 ? 1 : PX_PER_SEC >= 20 ? 2 : 5;
+  for (let t = 0; t <= duration; t += step) {
+    const x = secToX(t);
+    ctx.fillStyle = '#2a2d3a';
+    ctx.fillRect(x, RULER_H - 4, 1, 4);
+    ctx.fillStyle = '#64748b';
+    ctx.fillText(fmt(t), x + 2, RULER_H - 6);
+  }
+
+  // Segments
+  segments.forEach(seg => {
+    const x = secToX(seg.start);
+    const w = secToX(seg.end) - x;
+    const col = speedColor(seg.speed);
+    const isSelected = seg === selectedSeg;
+
+    ctx.globalAlpha = isSelected ? 0.9 : 0.65;
+    ctx.fillStyle = col;
+    ctx.fillRect(x, RULER_H + 2, w, SEG_H);
+
+    // Border
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = isSelected ? '#fff' : col;
+    ctx.lineWidth = isSelected ? 2 : 1;
+    ctx.strokeRect(x + 0.5, RULER_H + 2.5, w - 1, SEG_H - 1);
+
+    // Drag handles
+    ctx.fillStyle = isSelected ? '#fff' : col;
+    ctx.fillRect(x, RULER_H + 2, 4, SEG_H);
+    ctx.fillRect(x + w - 4, RULER_H + 2, 4, SEG_H);
+
+    // Label
+    ctx.fillStyle = '#000';
+    ctx.globalAlpha = 0.7;
+    ctx.font = 'bold 11px monospace';
+    const label = `${seg.speed}×`;
+    const lw = ctx.measureText(label).width;
+    if (w > lw + 10) ctx.fillText(label, x + w/2 - lw/2, RULER_H + SEG_H/2 + 4);
+    ctx.globalAlpha = 1;
+  });
+
+  // Playhead
+  const px = secToX(playheadPos);
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(px, 0);
+  ctx.lineTo(px, tl.height);
+  ctx.stroke();
+  // Triangle
+  ctx.fillStyle = '#f59e0b';
+  ctx.beginPath();
+  ctx.moveTo(px - 5, 0);
+  ctx.lineTo(px + 5, 0);
+  ctx.lineTo(px, 8);
+  ctx.fill();
+}
+
+// ─── Timeline interactions ─────────────────────────────────────────────────────
+function tlPos(e) {
+  const rect = tl.getBoundingClientRect();
+  return e.clientX - rect.left + tlScroll.scrollLeft;
+}
+function hitTest(x) {
+  const HANDLE = 6;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const seg = segments[i];
+    const sx = secToX(seg.start), ex = secToX(seg.end);
+    if (x >= sx - HANDLE && x <= sx + HANDLE) return { seg, edge: 'start' };
+    if (x >= ex - HANDLE && x <= ex + HANDLE) return { seg, edge: 'end' };
+    if (x > sx && x < ex) return { seg, edge: 'move' };
+  }
+  return null;
+}
+
+tl.addEventListener('mousedown', e => {
+  if (!duration) return;
+  const x = tlPos(e);
+  const hit = hitTest(x);
+  if (hit) {
+    selectedSeg = hit.seg;
+    dragging = { ...hit, initX: x, initStart: hit.seg.start, initEnd: hit.seg.end };
+    drawTL(); renderSegList();
+  } else {
+    // Click on empty area → move playhead
+    playheadPos = xToSec(x);
+    vid.currentTime = playheadPos;
+    drawTL();
+  }
+});
+
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const x = tlPos(e);
+  const dx = (x - dragging.initX) / PX_PER_SEC;
+  const seg = dragging.seg;
+  const MIN = 0.2;
+  if (dragging.edge === 'start') {
+    seg.start = Math.max(0, Math.min(seg.end - MIN, dragging.initStart + dx));
+  } else if (dragging.edge === 'end') {
+    seg.end = Math.min(duration, Math.max(seg.start + MIN, dragging.initEnd + dx));
+  } else {
+    const len = dragging.initEnd - dragging.initStart;
+    seg.start = Math.max(0, Math.min(duration - len, dragging.initStart + dx));
+    seg.end = seg.start + len;
+  }
+  drawTL(); renderSegList();
+});
+
+window.addEventListener('mouseup', () => { dragging = null; });
+
+// ─── Playhead sync ────────────────────────────────────────────────────────────
+vid.addEventListener('timeupdate', () => {
+  playheadPos = vid.currentTime;
+  phTime.textContent = fmt(vid.currentTime);
+  drawTL();
+  // scroll timeline to keep playhead visible
+  const px = secToX(playheadPos);
+  const { scrollLeft, clientWidth } = tlScroll;
+  if (px < scrollLeft + 20 || px > scrollLeft + clientWidth - 40) {
+    tlScroll.scrollLeft = Math.max(0, px - clientWidth / 2);
+  }
+});
+
+// Space = play/pause
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); vid.paused ? vid.play() : vid.pause(); }
+  if (e.code === 'Delete' && selectedSeg) { removeSeg(selectedSeg); }
+  if (e.code === 'ArrowLeft')  { vid.currentTime = Math.max(0, vid.currentTime - (e.shiftKey ? 5 : 1)); }
+  if (e.code === 'ArrowRight') { vid.currentTime = Math.min(duration, vid.currentTime + (e.shiftKey ? 5 : 1)); }
+});
+
+// ─── Segment management ───────────────────────────────────────────────────────
+document.getElementById('btn-add').addEventListener('click', () => {
+  if (!duration) return;
+  const speed = parseFloat(document.getElementById('speed-input').value) || 1.5;
+  const start = playheadPos;
+  const end = Math.min(duration, start + Math.max(3, duration * 0.1));
+  segments.push({ id: ++segId, start, end, speed });
+  segments.sort((a,b) => a.start - b.start);
+  selectedSeg = segments.find(s => s.id === segId);
+  drawTL(); renderSegList();
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  segments = []; selectedSeg = null; drawTL(); renderSegList();
+});
+
+function removeSeg(seg) {
+  segments = segments.filter(s => s !== seg);
+  if (selectedSeg === seg) selectedSeg = null;
+  drawTL(); renderSegList();
+}
+
+function renderSegList() {
+  const el = document.getElementById('segment-list');
+  if (!segments.length) { el.innerHTML = '<div style="padding:12px;font-size:12px;color:var(--muted)">No segments yet.<br>Click "Add segment" or<br>click the timeline.</div>'; return; }
+  el.innerHTML = segments.map(s => `
+    <div class="seg-item ${s === selectedSeg ? 'selected' : ''}" onclick="selectSeg(${s.id})">
+      <div class="seg-label">
+        <span class="seg-speed" style="color:${speedColor(s.speed)}">${s.speed}×</span>
+        <button class="seg-del" onclick="event.stopPropagation();removeSeg(segments.find(x=>x.id===${s.id}))">✕</button>
+      </div>
+      <div class="seg-time">${fmt(s.start)} → ${fmt(s.end)}</div>
+      <div style="margin-top:4px;display:flex;gap:4px;align-items:center">
+        <input type="range" min="0.25" max="4" step="0.25" value="${s.speed}" style="flex:1;accent-color:${speedColor(s.speed)}"
+          oninput="updateSegSpeed(${s.id},this.value)">
+        <span style="font-size:10px;color:var(--muted);width:28px">${s.speed}×</span>
+      </div>
+    </div>`).join('');
+}
+
+function selectSeg(id) {
+  selectedSeg = segments.find(s => s.id === id);
+  drawTL(); renderSegList();
+}
+
+window.selectSeg = selectSeg;
+window.removeSeg = removeSeg;
+window.updateSegSpeed = (id, val) => {
+  const seg = segments.find(s => s.id === id);
+  if (seg) { seg.speed = parseFloat(val); drawTL(); renderSegList(); }
+};
+
+// ─── Export / Process ─────────────────────────────────────────────────────────
+document.getElementById('process-btn').addEventListener('click', async () => {
+  if (!currentFile) return;
+
+  const statusEl = document.getElementById('status');
+  const btn = document.getElementById('process-btn');
+
+  // If no segments, use full video with default 1× speed
+  let segsToUse = segments.length ? segments : [{ start: 0, end: duration, speed: 1.0 }];
+
+  // Fill gaps between segments with 1× speed
+  const filled = [];
+  let cursor = 0;
+  for (const seg of [...segsToUse].sort((a,b) => a.start - b.start)) {
+    if (seg.start > cursor + 0.05) filled.push({ start: cursor, end: seg.start, speed: 1.0 });
+    filled.push(seg);
+    cursor = seg.end;
+  }
+  if (cursor < duration - 0.05) filled.push({ start: cursor, end: duration, speed: 1.0 });
+
+  const music = document.getElementById('music-input').value.trim() || null;
+  const musicVolume = parseFloat(document.getElementById('vol-input').value) || 0.15;
+
+  btn.disabled = true;
+  statusEl.className = '';
+  statusEl.textContent = 'Processing…';
+
+  try {
+    const res = await fetch(`${API}/api/process`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: currentFile, segments: filled, music, musicVolume }),
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.type === 'progress') {
+            statusEl.textContent = `Processing… ${fmt(msg.seconds)}`;
+          } else if (msg.type === 'done') {
+            statusEl.className = 'ok';
+            statusEl.textContent = `✓ Saved to output/final/${msg.output}`;
+          } else if (msg.type === 'error') {
+            statusEl.className = 'err';
+            statusEl.textContent = `Error: ${msg.message.slice(0, 120)}`;
+          }
+        } catch {}
+      }
+    }
+  } catch (err) {
+    statusEl.className = 'err';
+    statusEl.textContent = `Network error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => { resizeTL(); drawTL(); });
+tlScroll.addEventListener('scroll', () => drawTL());
+loadVideoList();
+resizeTL();
+</script>
+</body>
+</html>

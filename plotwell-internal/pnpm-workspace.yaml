@@ -1,0 +1,7 @@
+packages:
+  - 'app'
+  - 'shell'
+  - 'tools/*'
+  - 'shared/*'
+allowBuilds:
+  esbuild: false

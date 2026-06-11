@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { PricingService } from '../services/pricingService';
 import { createClient } from '@supabase/supabase-js';
-import { AI_CREDITS_CONFIG, getEffectiveCost, PRICING_PLANS } from '../config/pricingPlans';
+import { AI_CREDITS_CONFIG, getEffectiveCost } from '../config/pricingPlans';
 
 // Initialize Supabase client lazily to ensure env vars are loaded
 let supabase: ReturnType<typeof createClient> | null = null;
@@ -61,12 +61,12 @@ export const checkProjectLimit = async (req: PricingRequest, res: Response, next
 /**
  * Middleware to check if user can use AI Creative Tasks
  *
- * NEW SYSTEM (January 2025):
- * - FREE users: 20 tasks LIFETIME (never resets, must upgrade when depleted)
- * - PAID users: Uses credit system (getEffectiveCost('creative') - 0 during launch, 1 after)
+ * All users (free and paid) use the same credit system.
+ * Free users receive a one-time trial allotment (aiTrialCredits) on signup.
+ * After trial credits are exhausted, any user can purchase more.
  *
  * Supports collaboration - if user is a collaborator on a project,
- * uses the project owner's subscription and quotas instead of the user's own
+ * uses the project owner's credits instead of the user's own.
  */
 export const checkAICreativeTaskLimit = async (req: PricingRequest, res: Response, next: NextFunction) => {
   try {
@@ -80,23 +80,21 @@ export const checkAICreativeTaskLimit = async (req: PricingRequest, res: Respons
     const projectId = req.query.project_id || req.body.project_id || req.params.project_id;
 
     const pricingService = req.pricingService || new PricingService(getSupabaseClient());
-    let targetUserId = userId; // Default to the requesting user
+    let targetUserId = userId;
     let isCollaborator = false;
 
     // If we have a project_id, check if user is a collaborator
     if (projectId) {
       const supabaseClient = getSupabaseClient();
 
-      // First check if user owns this project
-      const { data: project, error: projectError } = await supabaseClient
+      const { data: project } = await supabaseClient
         .from('projects')
         .select('user_id')
         .eq('id', projectId)
         .single();
 
       if (project && project.user_id !== userId) {
-        // User doesn't own the project, check if they're a collaborator
-        const { data: collaborator, error: collabError } = await supabaseClient
+        const { data: collaborator } = await supabaseClient
           .from('project_collaborators')
           .select('project_id')
           .eq('project_id', projectId)
@@ -104,60 +102,30 @@ export const checkAICreativeTaskLimit = async (req: PricingRequest, res: Respons
           .eq('status', 'active')
           .single();
 
-        if (collaborator && !collabError) {
-          // User is a collaborator, use project owner's quotas
+        if (collaborator) {
           isCollaborator = true;
           targetUserId = project.user_id as string;
         }
       }
     }
 
-    // Get user's subscription to determine plan type
-    const subscription = await pricingService.getUserSubscription(targetUserId);
-    const isPaidPlan = subscription.plan_id === 'paid';
+    // Ensure free trial credits are seeded for new users, then check balance
+    const balance = await pricingService.ensureFreeUserCredits(targetUserId);
+    const creativeCost = getEffectiveCost('creative');
 
-    if (isPaidPlan) {
-      // PAID USERS: Check credit system
-      const creativeCost = getEffectiveCost('creative');
-
-      if (creativeCost > 0) {
-        // After launch offer ends, check credits balance
-        const balance = await pricingService.getAICreditsBalance(targetUserId);
-
-        if (balance < creativeCost) {
-          return res.status(403).json({
-            error: 'Insufficient AI credits',
-            message: `Creative tasks require ${creativeCost} credit(s). Your balance: ${balance}. Purchase more credits to continue.`,
-            type: 'INSUFFICIENT_CREDITS',
-            credits_required: creativeCost,
-            credits_balance: balance,
-            action_required: 'purchase_credits',
-            is_collaborator: isCollaborator
-          });
-        }
-      }
-      // If creativeCost is 0 (launch offer active), allow unlimited
-      next();
-    } else {
-      // FREE USERS: Check lifetime quota (20 tasks total, never resets)
-      const used = subscription.ai_generations_used || 0;
-      const limit = PRICING_PLANS.free.limits.aiCreativeTasks; // Lifetime limit for free users (from plan config)
-
-      if (used >= limit) {
-        return res.status(403).json({
-          error: 'AI Creative Task limit exceeded',
-          message: `You've used all ${limit} of your free AI Creative Tasks. Upgrade to Pro to continue using AI features.`,
-          type: 'LIMIT_EXCEEDED',
-          action_required: 'upgrade',
-          remaining: 0,
-          used: used,
-          limit: limit,
-          is_collaborator: isCollaborator
-        });
-      }
-
-      next();
+    if (balance < creativeCost) {
+      return res.status(403).json({
+        error: 'Insufficient AI credits',
+        message: `Creative tasks require ${creativeCost} credit(s). Your balance: ${balance}. Purchase more credits to continue.`,
+        type: 'INSUFFICIENT_CREDITS',
+        credits_required: creativeCost,
+        credits_balance: balance,
+        action_required: 'purchase_credits',
+        is_collaborator: isCollaborator
+      });
     }
+
+    next();
   } catch (error) {
     console.error('Error checking AI Creative Task limit:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -208,27 +176,30 @@ export const trackAIUsage = async (req: PricingRequest, res: Response, next: Nex
 };
 
 /**
- * Helper to track creative usage for a specific user based on their plan
+ * Helper to track creative usage for a specific user.
+ * All users deduct from the unified ai_credits_balance pool.
  */
 const trackCreativeUsageForUser = async (userId: string, pricingService: PricingService) => {
   try {
-    // Get user's subscription to determine plan type
-    const subscription = await pricingService.getUserSubscription(userId);
-    const isPaidPlan = subscription.plan_id === 'paid';
-
-    // Always increment the AI tasks counter (for both free and paid users)
     await pricingService.trackAIGeneration(userId);
 
-    if (isPaidPlan) {
-      // PAID USERS: Consume credits (if applicable)
-      const creativeCost = getEffectiveCost('creative');
-      if (creativeCost > 0) {
-        await pricingService.consumeAICredits(userId, creativeCost, 'Creative task');
-      }
+    const creditCost = getEffectiveCost('creative');
+    if (creditCost > 0) {
+      await pricingService.consumeAICredits(userId, creditCost, 'Creative task');
     }
   } catch (err) {
     console.error('Error tracking creative usage:', err);
   }
+};
+
+/**
+ * Manually track creative AI usage for routes that use SSE (non-JSON responses).
+ * Handles collaboration: charges the project owner's quota if user is a collaborator.
+ * Call this after successful AI generation in SSE routes instead of relying on trackAIUsage.
+ */
+export const manualTrackCreativeUsage = async (userId: string, projectId: string, pricingService?: PricingService) => {
+  const service = pricingService || new PricingService(getSupabaseClient());
+  await checkCollaborationAndTrackCreative(userId, projectId, service);
 };
 
 /**
@@ -284,6 +255,7 @@ export const trackAICreditsUsage = async (req: PricingRequest, res: Response, ne
     if (res.statusCode >= 200 && res.statusCode < 300) {
       const userId = req.userId;
       const creditsRequired = req.aiCreditsRequired || AI_CREDITS_CONFIG.costs.image;
+      const usageDescription = req.aiCreditsUsageDescription || 'Image generation';
 
       if (userId) {
         // Extract project_id to determine if this is a collaboration
@@ -293,10 +265,10 @@ export const trackAICreditsUsage = async (req: PricingRequest, res: Response, ne
 
         // Check if user is a collaborator and consume from project owner's credits
         if (projectId) {
-          checkCollaborationAndConsumeCredits(userId, projectId as string, creditsRequired, pricingService);
+          checkCollaborationAndConsumeCredits(userId, projectId as string, creditsRequired, pricingService, usageDescription);
         } else {
           // No project ID, consume from user's own credits
-          pricingService.consumeAICredits(userId, creditsRequired, 'Image generation').catch((err: Error) => {
+          pricingService.consumeAICredits(userId, creditsRequired, usageDescription).catch((err: Error) => {
             console.error('Error consuming AI credits:', err);
           });
         }
@@ -316,7 +288,7 @@ export const trackImageUsage = trackAICreditsUsage;
 /**
  * Helper function to check collaboration and consume AI credits accordingly
  */
-const checkCollaborationAndConsumeCredits = async (userId: string, projectId: string, creditsRequired: number, pricingService: PricingService) => {
+const checkCollaborationAndConsumeCredits = async (userId: string, projectId: string, creditsRequired: number, pricingService: PricingService, usageDescription = 'Image generation') => {
   try {
     const supabaseClient = getSupabaseClient();
 
@@ -345,7 +317,7 @@ const checkCollaborationAndConsumeCredits = async (userId: string, projectId: st
       }
     }
 
-    await pricingService.consumeAICredits(targetUserId, creditsRequired, 'Image generation', {
+    await pricingService.consumeAICredits(targetUserId, creditsRequired, usageDescription, {
       project_id: projectId,
       initiated_by: userId
     });
@@ -568,17 +540,13 @@ export const checkAICredits = async (req: PricingRequest, res: Response, next: N
     const balance = await pricingService.getAICreditsBalance(targetUserId);
 
     if (balance < creditsRequired) {
-      // Check if user has a paid plan (required to purchase credits)
-      const subscription = await pricingService.getUserSubscription(targetUserId);
-      const isPaidPlan = subscription.plan_id === 'paid';
-
       return res.status(403).json({
         error: 'Insufficient AI credits',
-        message: `This operation requires ${creditsRequired} AI credits. Your balance: ${balance}. ${isPaidPlan ? 'Purchase more credits to continue.' : 'Upgrade to Pro to purchase AI credits.'}`,
+        message: `This operation requires ${creditsRequired} AI credits. Your balance: ${balance}. Purchase more credits to continue.`,
         type: 'INSUFFICIENT_CREDITS',
         credits_required: creditsRequired,
         credits_balance: balance,
-        action_required: isPaidPlan ? 'purchase_credits' : 'upgrade',
+        action_required: 'purchase_credits',
         is_collaborator: isCollaborator
       });
     }
@@ -600,124 +568,12 @@ export const checkAICredits = async (req: PricingRequest, res: Response, next: N
 export const checkImageCredits = checkAICredits;
 
 /**
- * Utility function to handle plan-specific feature access
- * Now supports collaboration - if user is a collaborator on a project,
- * uses the project owner's subscription instead of the user's own subscription
+ * Feature access middleware — all features are available to all users.
+ * Kept as a passthrough so existing route registrations don't need to change.
+ * Feature gating can be re-introduced here if a paid plan is activated.
  */
-export const requireFeature = (feature: string) => {
-  return async (req: PricingRequest, res: Response, next: NextFunction) => {
-    try {
-      const userId = req.userId;
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User not authenticated' });
-      }
-
-      let projectId;
-      try {
-        projectId = req.query?.project_id || req.body?.project_id || req.params?.project_id;
-      } catch (error) {
-        console.error('❌ Error extracting project_id from request:', error);
-        console.error('❌ Request details:', { query: req.query, body: req.body, params: req.params });
-        return res.status(500).json({ error: 'Internal error extracting project_id' });
-      }
-
-      // If no direct project_id, try to get it from storyboard panel
-      if (!projectId && req.params.id && req.route.path.includes('storyboard')) {
-
-        const supabaseClient = getSupabaseClient();
-
-        const { data: panel, error: panelError } = await supabaseClient
-          .from('storyboard_panels')
-          .select('*')  // Select all fields to see what we get
-          .eq('id', req.params.id)
-          .single();
-
-        if (panelError) {
-          console.error('❌ Error fetching storyboard panel for feature check:', panelError);
-          return res.status(404).json({ error: 'Storyboard panel not found' });
-        }
-
-        if (panel && panel.project_id) {
-          projectId = panel.project_id;
-        } else {
-          console.error('❌ Storyboard panel found but no project_id for feature check:', panel);
-          return res.status(400).json({ error: 'Invalid storyboard panel data' });
-        }
-      }
-
-      const pricingService = req.pricingService || new PricingService(getSupabaseClient());
-      let subscription = await pricingService.getUserSubscription(userId);
-      let isCollaborator = false;
-      let projectOwnerId = null;
-
-      // If we have a project_id, check if user is a collaborator
-      if (projectId) {
-        const supabaseClient = getSupabaseClient();
-
-        // First check if user owns this project
-        const { data: project, error: projectError } = await supabaseClient
-          .from('projects')
-          .select('user_id')
-          .eq('id', projectId)
-          .single();
-
-        if (project && project.user_id !== userId) {
-          // User doesn't own the project, check if they're a collaborator
-          const { data: collaborator, error: collabError } = await supabaseClient
-            .from('project_collaborators')
-            .select('project_id')
-            .eq('project_id', projectId)
-            .eq('user_id', userId)
-            .eq('status', 'active')
-            .single();
-
-          if (collaborator && !collabError) {
-            // User is a collaborator, use project owner's subscription
-            isCollaborator = true;
-            projectOwnerId = project.user_id;
-            subscription = await pricingService.getUserSubscription(projectOwnerId);
-          }
-        }
-      }
-
-      const plan = pricingService.getPlan(subscription.plan_id);
-
-      if (!plan) {
-        return res.status(403).json({ error: 'Invalid subscription plan' });
-      }
-
-      // Check if plan supports the feature
-      let hasFeature = false;
-
-      switch (feature) {
-        case 'priority_support':
-          hasFeature = plan.limits.prioritySupport;
-          break;
-        case 'storyboards':
-          hasFeature = plan.limits.storyboards || false;
-          break;
-        case 'version_control':
-          hasFeature = plan.limits.versionControl || false;
-          break;
-        default:
-          hasFeature = true; // Unknown features are allowed by default
-      }
-
-      if (!hasFeature) {
-        return res.status(403).json({
-          error: `Feature not available on ${plan.name} plan`,
-          feature: feature,
-          current_plan: plan.name,
-          action_required: 'upgrade',
-          is_collaborator: isCollaborator
-        });
-      }
-
-      next();
-    } catch (error) {
-      console.error(`Error checking feature access for ${feature}:`, error);
-      res.status(500).json({ error: 'Internal server error' });
-    }
+export const requireFeature = (_feature: string) => {
+  return (_req: PricingRequest, _res: Response, next: NextFunction) => {
+    next();
   };
 };

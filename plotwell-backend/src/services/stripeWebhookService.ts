@@ -2,6 +2,8 @@ import Stripe from 'stripe';
 import { supabase } from '../config/database';
 import { getPlanIdFromStripePrice, getPlanById, AI_CREDITS_CONFIG } from '../config/pricingPlans';
 import { PricingService } from './pricingService';
+import { emailService } from './emailService';
+const DEBUG_AI = process.env.DEBUG_AI === 'true';
 
 export class StripeWebhookService {
   
@@ -73,10 +75,8 @@ export class StripeWebhookService {
       const priceId = basePlanItemCreated?.price?.id || subscription.items.data[0].price.id;
       const planId = getPlanIdFromStripePrice(priceId);
 
-      if (!planId) {
-        console.error('Unknown Stripe price ID:', priceId);
-        return;
-      }
+      // Addon-only subscription (free user first purchase) — no base plan price
+      const isAddonOnlySubscription = !planId && !basePlanItemCreated;
 
       // Get user ID from stripe customer ID
       const { data: user, error: userError } = await supabase
@@ -90,7 +90,19 @@ export class StripeWebhookService {
         return;
       }
 
-      // SECURITY FIX: Only update plan_id in user_subscriptions if subscription is active
+      // Read addon counts from subscription items (for addon-only subscriptions)
+      const additionalProjects = subscription.items.data
+        .filter((item: any) => getAddonTypeFromPriceId(item.price.id) === 'additional_projects')
+        .reduce((sum: number, item: any) => sum + (item.quantity || 0), 0);
+      const additionalCollaborators = subscription.items.data
+        .filter((item: any) => getAddonTypeFromPriceId(item.price.id) === 'additional_collaborators')
+        .reduce((sum: number, item: any) => sum + (item.quantity || 0), 0);
+
+      // For addon-only subscriptions, preserve the user's existing plan_id (stays 'free')
+      const effectivePlanId = isAddonOnlySubscription
+        ? (subscription.metadata?.plan_id || 'free')
+        : (planId || 'free');
+
       const subscriptionData: any = {
         user_id: user.id,
         status: status,
@@ -98,22 +110,22 @@ export class StripeWebhookService {
         current_period_start: currentPeriodStart ? currentPeriodStart.toISOString() : null,
         current_period_end: currentPeriodEnd ? currentPeriodEnd.toISOString() : null,
         cancel_at_period_end: subscription.cancel_at_period_end || false,
+        additional_projects: additionalProjects,
+        additional_collaborators: additionalCollaborators,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       };
 
-      // Only set plan_id if subscription is actually paid/active
       if (status === 'active' || status === 'trialing') {
-        subscriptionData.plan_id = planId;
+        subscriptionData.plan_id = effectivePlanId;
       } else {
-        // Keep current plan for incomplete subscriptions
         subscriptionData.plan_id = 'free';
       }
 
       const { error: subscriptionError } = await supabase
         .from('user_subscriptions')
-        .upsert(subscriptionData, { 
-          onConflict: 'user_id' 
+        .upsert(subscriptionData, {
+          onConflict: 'user_id'
         });
 
       if (subscriptionError) {
@@ -137,6 +149,24 @@ export class StripeWebhookService {
 
       // Note: Launch offer credits are now granted in handleCheckoutSessionCompleted
       // when payment is confirmed, not here
+
+      // Send welcome email (fire-and-forget)
+      const { data: userData } = await supabase
+        .from('users')
+        .select('email')
+        .eq('stripe_customer_id', customerId)
+        .single();
+
+      if (userData?.email) {
+        const isTrialing = status === 'trialing';
+        const billingCycle = this.detectBillingCycle(subscription);
+        emailService.sendWelcomeEmail({
+          to: userData.email,
+          isTrialing,
+          billingCycle,
+          periodEnd: currentPeriodEnd ? currentPeriodEnd.toISOString() : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+        }).catch(err => console.error('❌ Failed to send welcome email:', err));
+      }
 
     } catch (error) {
       console.error('Error handling subscription created:', error);
@@ -328,6 +358,12 @@ export class StripeWebhookService {
 
       // CRITICAL: Preserve stripe_customer_id when cancelling subscriptions
       // The customer should persist for future resubscriptions
+      const { data: cancelledUser } = await supabase
+        .from('users')
+        .select('email')
+        .eq('stripe_customer_id', customerId)
+        .single();
+
       const { error } = await supabase
         .from('users')
         .update({
@@ -341,6 +377,13 @@ export class StripeWebhookService {
       if (error) {
         console.error('Error downgrading user to free plan:', error);
         throw error;
+      }
+
+      // Send cancellation email (fire-and-forget)
+      if (cancelledUser?.email) {
+        emailService.sendCancelledEmail({
+          to: cancelledUser.email,
+        }).catch(err => console.error('❌ Failed to send cancelled email:', err));
       }
 
     } catch (error) {
@@ -371,11 +414,39 @@ export class StripeWebhookService {
       // - PAID users use the credit system (ai_credits_balance) which is one-time purchases
       // - No need to reset ai_generations_used on subscription renewal anymore
       // - AI credits (ai_credits_balance) are also NOT reset - they are one-time purchases
-      console.log(`✅ Invoice payment succeeded for user ${user.id} (email: ${user.email}) - no quota reset needed (paid users use credit system)`);
-
+      if (DEBUG_AI) console.log(`✅ Invoice payment succeeded for user ${user.id} (email: ${user.email}) - no quota reset needed (paid users use credit system)`);
 
       // Note: AI credits are now one-time purchases via /api/ai-credits/purchase
       // They are handled in handleCheckoutSessionCompleted, not here
+
+      // Send renewal confirmation email (skip for first invoice / trial conversion)
+      const billingReason = (invoice as any).billing_reason;
+      if (user.email && billingReason === 'subscription_cycle') {
+        const amountPaid = (invoice.amount_paid || 0) / 100;
+        const currency = (invoice.currency || 'usd').toUpperCase();
+        const currencySymbol = currency === 'USD' ? '$' : currency === 'EUR' ? '\u20AC' : currency;
+
+        // Get next renewal date from subscription
+        let nextRenewalDate = '';
+        if (subscriptionId) {
+          try {
+            const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+            const sub = await stripe.subscriptions.retrieve(subscriptionId);
+            if (sub.current_period_end) {
+              nextRenewalDate = new Date(sub.current_period_end * 1000).toISOString();
+            }
+          } catch {
+            // Fallback: estimate 30 days from now
+            nextRenewalDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+          }
+        }
+
+        emailService.sendRenewalEmail({
+          to: user.email,
+          amount: `${currencySymbol}${amountPaid.toFixed(2)}`,
+          nextRenewal: nextRenewalDate,
+        }).catch(err => console.error('❌ Failed to send renewal email:', err));
+      }
 
       // billing_history table deprecated - now using direct Stripe API integration
     } catch (error) {
@@ -400,17 +471,25 @@ export class StripeWebhookService {
         return;
       }
 
-      // Update subscription status to past_due
+      // Update subscription status to past_due in user_subscriptions table
       const { error } = await supabase
-        .from('users')
+        .from('user_subscriptions')
         .update({
-          subscription_status: 'past_due'
+          status: 'past_due',
+          updated_at: new Date().toISOString()
         })
-        .eq('stripe_customer_id', customerId);
+        .eq('user_id', user.id);
 
       if (error) {
         console.error('Error updating subscription status to past_due:', error);
         throw error;
+      }
+
+      // Send payment failed email (fire-and-forget)
+      if (user.email) {
+        emailService.sendPaymentFailedEmail({
+          to: user.email,
+        }).catch(err => console.error('❌ Failed to send payment failed email:', err));
       }
 
       // Create billing history record for failed payment with proper period handling
@@ -560,6 +639,27 @@ export class StripeWebhookService {
               stripe_checkout_session_id: session.id,
               stripe_payment_intent_id: session.payment_intent as string
             });
+
+            // Send credits confirmation email (fire-and-forget)
+            const { data: creditsUser } = await supabase
+              .from('users')
+              .select('email')
+              .eq('id', userId)
+              .single();
+
+            if (creditsUser?.email) {
+              const { data: quotas } = await supabase
+                .from('user_quotas')
+                .select('ai_credits_balance')
+                .eq('user_id', userId)
+                .single();
+
+              emailService.sendCreditsEmail({
+                to: creditsUser.email,
+                creditsAmount,
+                newBalance: quotas?.ai_credits_balance || creditsAmount,
+              }).catch(err => console.error('❌ Failed to send credits email:', err));
+            }
           }
         }
         return; // Exit early for credit purchases
@@ -570,14 +670,22 @@ export class StripeWebhookService {
         // Get the plan from metadata
         const planId = session.metadata?.plan_id || 'paid'; // default to paid (new pricing model)
 
-        // Get the Stripe price ID from the subscription
+        // Get the Stripe subscription details (price ID, period dates)
         let stripePriceId = null;
+        let periodStart = new Date().toISOString();
+        let periodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // fallback
         try {
           const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
           const subscription = await stripe.subscriptions.retrieve(subscriptionId);
           stripePriceId = subscription.items.data[0]?.price?.id || null;
+          if (subscription.current_period_start) {
+            periodStart = new Date(subscription.current_period_start * 1000).toISOString();
+          }
+          if (subscription.current_period_end) {
+            periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
+          }
         } catch (err) {
-          console.error('Could not retrieve Stripe price ID:', err);
+          console.error('Could not retrieve Stripe subscription details:', err);
         }
 
         // Update user subscription with complete Stripe data
@@ -590,8 +698,8 @@ export class StripeWebhookService {
             stripe_subscription_id: subscriptionId,
             stripe_customer_id: customerId,
             stripe_plan_price_id: stripePriceId,
-            current_period_start: new Date().toISOString(),
-            current_period_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days from now
+            current_period_start: periodStart,
+            current_period_end: periodEnd,
             cancel_at_period_end: false,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString()
@@ -732,7 +840,7 @@ export class StripeWebhookService {
           quantity: quantity,
           unit_price_cents: Math.round(unitPrice * 100),
           total_price_cents: Math.round(unitPrice * quantity * 100),
-          currency: addonConfig?.currency || 'EUR',
+          currency: addonConfig?.currency || 'USD',
           status: 'completed'
         });
 
@@ -793,6 +901,14 @@ export class StripeWebhookService {
       console.error('Error handling refund created:', error);
       throw error;
     }
+  }
+
+  /**
+   * Detect billing cycle from a Stripe subscription object
+   */
+  private detectBillingCycle(subscription: Stripe.Subscription): 'monthly' | 'yearly' {
+    const interval = subscription.items.data[0]?.price?.recurring?.interval;
+    return interval === 'year' ? 'yearly' : 'monthly';
   }
 
   async processWebhookEvent(event: Stripe.Event): Promise<void> {

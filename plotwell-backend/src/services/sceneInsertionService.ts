@@ -1,5 +1,13 @@
-// Scene Insertion Service - Handle inserting AI-generated scenes into TipTap documents
+// Scene Insertion Service - Handle inserting AI-generated scenes into ProseMirror documents
 import { createClient } from '@supabase/supabase-js';
+import { ensureProsemirrorFormat } from '../utils/formatDetection';
+import { createScriptVersionSnapshot } from './scriptVersionService';
+import {
+  applyScriptContentToActiveRoom,
+  flushActiveScriptRoomToDatabase,
+  getActiveScriptRoomContent,
+  hasActiveCollaborationRoom,
+} from './collaborationServer';
 
 const DEBUG_AI = process.env.DEBUG_AI === 'true';
 
@@ -8,19 +16,19 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-export interface TipTapDocument {
+export interface ScriptDocument {
   type: 'doc';
-  content: TipTapNode[];
+  content: ScriptNode[];
 }
 
-export interface TipTapNode {
+export interface ScriptNode {
   type: string;
   attrs?: { [key: string]: any };
-  content?: TipTapTextNode[];
+  content?: ScriptTextNode[];
   text?: string;
 }
 
-export interface TipTapTextNode {
+export interface ScriptTextNode {
   type: 'text';
   text: string;
   marks?: any[];
@@ -37,7 +45,7 @@ export interface SceneInsertionOptions {
 
 export interface SceneInsertionResult {
   success: boolean;
-  updatedScript?: TipTapDocument;
+  updatedScript?: ScriptDocument;
   scriptId?: string;
   insertedAt?: number;
   error?: string;
@@ -75,9 +83,12 @@ export class SceneInsertionService {
         return { success: false, error: `Script not found: ${scriptError?.message}` };
       }
 
-      // 3. Parse the documents
-      const sceneDoc = scene.content as TipTapDocument;
-      const scriptDoc = script.content as TipTapDocument;
+      const activeRoom = hasActiveCollaborationRoom(projectId, 'script', scriptId);
+      const activeScriptContent = activeRoom ? getActiveScriptRoomContent(projectId, scriptId) : null;
+
+      // 3. Parse the documents and ensure ProseMirror format
+      const sceneDoc = ensureProsemirrorFormat(scene.content) as ScriptDocument;
+      const scriptDoc = ensureProsemirrorFormat(activeScriptContent || script.content) as ScriptDocument;
 
       if (!sceneDoc?.content || !scriptDoc?.content) {
         return { success: false, error: 'Invalid document structure' };
@@ -98,7 +109,7 @@ export class SceneInsertionService {
         };
       }
 
-      // Sanitize scene content to remove empty text nodes (TipTap rejects these)
+      // Sanitize scene content to remove empty text nodes (ProseMirror rejects these)
       const sanitizedSceneDoc = this.sanitizeDocument(sceneDoc);
 
       if (DEBUG_AI) console.log('📋 SCENE INSERTION DEBUG:', {
@@ -106,8 +117,8 @@ export class SceneInsertionService {
         targetNodeIndex,
         scriptContentLength: scriptDoc.content.length,
         sceneContentLength: sanitizedSceneDoc.content.length,
-        firstScriptNode: scriptDoc.content[0]?.attrs?.class,
-        scriptSceneHeadings: scriptDoc.content.filter(n => (n.attrs?.class || '').includes('scene-heading')).length
+        firstScriptNode: scriptDoc.content[0]?.type,
+        scriptSceneHeadings: scriptDoc.content.filter(n => n.type === 'sceneHeading').length
       });
 
       // 4. Perform the insertion
@@ -122,37 +133,49 @@ export class SceneInsertionService {
         return { success: false, error: 'Failed to insert scene into script' };
       }
 
-      // 5. Create a new version of the script (following the version control system)
-      const versionNumber = await this.getNextVersionNumber(scriptId);
-      
-      // 6. Save the updated script
-      const { data: updatedScriptData, error: updateError } = await supabase
-        .from('scripts')
-        .update({
-          content: updatedScript,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', scriptId)
-        .select()
-        .single();
-
-      if (updateError) {
-        return { success: false, error: `Failed to update script: ${updateError.message}` };
+      // 5. Snapshot the current script before applying the AI insertion.
+      if (activeRoom) {
+        await flushActiveScriptRoomToDatabase(projectId, scriptId, {
+          userId,
+          changeSummary: `Before AI scene insertion: ${scene.heading}`,
+          createVersion: true,
+        });
+      } else {
+        await createScriptVersionSnapshot(supabase, {
+          scriptId,
+          userId,
+          changeSummary: `Before AI scene insertion: ${scene.heading}`,
+        });
       }
 
-      // 7. Create version entry
-      await supabase
-        .from('script_versions')
-        .insert({
-          script_id: scriptId,
-          version_number: versionNumber,
-          title: script.title,
-          content: updatedScript,
-          change_summary: `Inserted scene: ${scene.heading}`,
-          created_by: userId
+      // 6. Save the updated script, using the collaboration room as source of truth when active.
+      if (activeRoom) {
+        const result = await applyScriptContentToActiveRoom(projectId, scriptId, updatedScript, {
+          userId,
+          changeSummary: `AI scene insertion: ${scene.heading}`,
+          flush: true,
         });
 
-      // 8. Update scene status to 'inserted'
+        if (!result.appliedToRoom) {
+          return { success: false, error: 'Failed to update active collaboration room' };
+        }
+      } else {
+        const { error: updateError } = await supabase
+          .from('scripts')
+          .update({
+            content: updatedScript,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', scriptId)
+          .select()
+          .single();
+
+        if (updateError) {
+          return { success: false, error: `Failed to update script: ${updateError.message}` };
+        }
+      }
+
+      // 7. Update scene status to 'inserted'
       await supabase
         .from('ai_generated_scenes')
         .update({
@@ -184,19 +207,18 @@ export class SceneInsertionService {
 
   /**
    * Find the node index where a scene ends (the last node before the next scene heading)
-   * @param nodes - The TipTap document content nodes
+   * @param nodes - The document content nodes
    * @param sceneNumber - The scene number to find (1-based)
    * @returns The index of the last node of that scene, or -1 if not found
    */
   /**
    * Check if a node is a scene heading
    */
-  private static isSceneHeading(node: TipTapNode): boolean {
-    const nodeClass = node.attrs?.class || '';
-    return nodeClass.includes('scene-heading');
+  private static isSceneHeading(node: ScriptNode): boolean {
+    return node.type === 'sceneHeading';
   }
 
-  private static findSceneEndIndex(nodes: TipTapNode[], sceneNumber: number): number {
+  private static findSceneEndIndex(nodes: ScriptNode[], sceneNumber: number): number {
     let currentScene = 0;
     let sceneStartIndex = -1;
 
@@ -231,19 +253,18 @@ export class SceneInsertionService {
    * Perform the actual insertion of scene content into script content
    */
   private static performInsertion(
-    scriptDoc: TipTapDocument,
-    sceneDoc: TipTapDocument,
+    scriptDoc: ScriptDocument,
+    sceneDoc: ScriptDocument,
     position: string,
     targetSceneNumber?: number
-  ): TipTapDocument | null {
+  ): ScriptDocument | null {
     try {
       const scriptContent = [...scriptDoc.content];
       const sceneContent = [...sceneDoc.content];
 
       // Add a separator comment before the inserted scene
-      const separator: TipTapNode = {
-        type: 'paragraph',
-        attrs: { class: 'action' },
+      const separator: ScriptNode = {
+        type: 'action',
         content: [{
           type: 'text',
           text: `// --- AI Generated Scene Inserted ---`
@@ -274,7 +295,7 @@ export class SceneInsertionService {
           // Log all scene headings for debugging
           if (DEBUG_AI) {
             const sceneHeadings = scriptContent
-              .map((n, i) => this.isSceneHeading(n) ? { index: i, class: n.attrs?.class, text: n.content?.[0]?.text } : null)
+              .map((n, i) => this.isSceneHeading(n) ? { index: i, type: n.type, text: n.content?.[0]?.text } : null)
               .filter(Boolean);
             console.log('📜 Script scene headings:', sceneHeadings);
           }
@@ -341,7 +362,7 @@ export class SceneInsertionService {
    * Find where the insertion will occur (for response metadata)
    */
   private static findInsertionPoint(
-    scriptDoc: TipTapDocument,
+    scriptDoc: ScriptDocument,
     position: string,
     targetIndex?: number
   ): number {
@@ -361,11 +382,11 @@ export class SceneInsertionService {
   }
 
   /**
-   * Sanitize a TipTap document to remove empty text nodes
-   * TipTap/ProseMirror rejects documents with empty text nodes
+   * Sanitize a script document to remove empty text nodes
+   * ProseMirror rejects documents with empty text nodes
    */
-  private static sanitizeDocument(doc: TipTapDocument): TipTapDocument {
-    const sanitizeNode = (node: TipTapNode): TipTapNode | null => {
+  private static sanitizeDocument(doc: ScriptDocument): ScriptDocument {
+    const sanitizeNode = (node: ScriptNode): ScriptNode | null => {
       // If this is a text node with empty text, remove it
       if (node.type === 'text' && (!node.text || node.text === '')) {
         return null;
@@ -374,14 +395,14 @@ export class SceneInsertionService {
       // If node has content array, recursively sanitize and filter out nulls
       if (node.content && Array.isArray(node.content)) {
         const sanitizedContent = node.content
-          .map(child => sanitizeNode(child as TipTapNode))
-          .filter((child): child is TipTapNode => child !== null);
+          .map(child => sanitizeNode(child as ScriptNode))
+          .filter((child): child is ScriptNode => child !== null);
 
         // If the paragraph/node ends up with no content, keep it but with minimal content
         // (empty paragraphs are valid, but paragraphs with empty text nodes are not)
         return {
           ...node,
-          content: sanitizedContent.length > 0 ? sanitizedContent as TipTapTextNode[] : undefined
+          content: sanitizedContent.length > 0 ? sanitizedContent as ScriptTextNode[] : undefined
         };
       }
 
@@ -390,7 +411,7 @@ export class SceneInsertionService {
 
     const sanitizedContent = doc.content
       .map(node => sanitizeNode(node))
-      .filter((node): node is TipTapNode => node !== null);
+      .filter((node): node is ScriptNode => node !== null);
 
     return {
       type: 'doc',
@@ -422,7 +443,7 @@ export class SceneInsertionService {
    */
   static async previewInsertion(options: SceneInsertionOptions): Promise<{
     success: boolean;
-    preview?: TipTapDocument;
+    preview?: ScriptDocument;
     error?: string;
   }> {
     try {
@@ -438,8 +459,11 @@ export class SceneInsertionService {
         return { success: false, error: 'Failed to fetch documents' };
       }
 
-      const sceneDoc = sceneResult.data.content as TipTapDocument;
-      const scriptDoc = scriptResult.data.content as TipTapDocument;
+      const activeScriptContent = hasActiveCollaborationRoom(projectId, 'script', scriptId)
+        ? getActiveScriptRoomContent(projectId, scriptId)
+        : null;
+      const sceneDoc = ensureProsemirrorFormat(sceneResult.data.content) as ScriptDocument;
+      const scriptDoc = ensureProsemirrorFormat(activeScriptContent || scriptResult.data.content) as ScriptDocument;
 
       const preview = this.performInsertion(scriptDoc, sceneDoc, insertPosition, targetNodeIndex);
 
@@ -482,19 +506,21 @@ export class SceneInsertionService {
         return { success: false, error: 'Script not found' };
       }
 
-      const scriptDoc = script.content as TipTapDocument;
+      const activeScriptContent = hasActiveCollaborationRoom(projectId, 'script', scriptId)
+        ? getActiveScriptRoomContent(projectId, scriptId)
+        : null;
+      const scriptDoc = ensureProsemirrorFormat(activeScriptContent || script.content) as ScriptDocument;
       if (!scriptDoc?.content) {
         return { success: false, error: 'Invalid script structure' };
       }
 
       const points = scriptDoc.content.map((node, index) => {
         const nodeText = this.getNodePreviewText(node);
-        const nodeClass = node.attrs?.class || node.type;
-        
+
         return {
           index,
-          description: `${nodeClass}: ${nodeText.substring(0, 50)}${nodeText.length > 50 ? '...' : ''}`,
-          nodeType: nodeClass,
+          description: `${node.type}: ${nodeText.substring(0, 50)}${nodeText.length > 50 ? '...' : ''}`,
+          nodeType: node.type,
           preview: nodeText.substring(0, 100)
         };
       });
@@ -510,9 +536,9 @@ export class SceneInsertionService {
   }
 
   /**
-   * Extract text content from a TipTap node for preview purposes
+   * Extract text content from a script node for preview purposes
    */
-  private static getNodePreviewText(node: TipTapNode): string {
+  private static getNodePreviewText(node: ScriptNode): string {
     if (node.text) {
       return node.text;
     }

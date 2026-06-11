@@ -1,4 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
+import { ensureProsemirrorFormat } from '../utils/formatDetection';
+import {
+  isSceneHeadingText,
+  parseSceneHeadingIdentity,
+} from '../utils/locationIdentity';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -40,16 +45,25 @@ export interface StoryboardScene {
 
 export class ScriptParsingService {
   // =========================================================================
-  // Page estimation constants — MUST match TipTap PaginationPlus configuration
-  // Source of truth: plotwell-app/src/lib/screenplay/constants.ts
-  //                  plotwell-app/src/screenplay.css
+  // Page estimation constants — MUST match the plotwell-editor pagination plugin
+  // Source of truth: plotwell-editor/src/plugins/pagination.ts  (CONTENT_H = 864px)
+  //                  plotwell-editor/src/styles.css             (--pw-line-h: 16px)
   //
-  // Page: US Letter, 12pt Courier New, 1.5 line-height (0.25" per line)
-  // Content height: 9.0" (11" - 1" top margin - 1" bottom margin)
-  // Lines per page: 36 (9.0" / 0.25")
-  // 1 em = 1 line (at 12pt × 1.5 line-height)
+  // Page: US Letter at 96 dpi
+  //   Total height:   11" = 1056px
+  //   Top margin:      1" =   96px
+  //   Bottom margin:   1" =   96px
+  //   Content height:  9" =  864px  ← CONTENT_H in pagination.ts
+  //
+  // Typography: 12pt Courier Prime/New = 16px, line-height: 16px (1×, single-spaced)
+  //   → 6 lines/inch  (96px/in ÷ 16px/line)
+  //   → 54 lines/page (864px ÷ 16px/line)
+  //
+  // NOTE: screenplay.css sets `.screenplay-editor.ProseMirror { line-height: 1.5 }`
+  // but that class is never applied to the plotwell-editor DOM — the editor's own
+  // styles.css (--pw-line-h: 16px) is what takes effect.
   // =========================================================================
-  private static readonly LINES_PER_PAGE = 36;
+  private static readonly LINES_PER_PAGE = 54;
 
   // Characters per line per element type (Courier 12pt ≈ 10 chars/inch)
   // Content area = 6.0" (8.5" page - 1.5" left margin - 1.0" right margin)
@@ -91,7 +105,15 @@ export class ScriptParsingService {
     return Math.max(prevBottom, currTop);
   }
 
+  // Valid ProseMirror screenplay node types
+  private static readonly SCREENPLAY_NODE_TYPES = new Set([
+    'sceneHeading', 'action', 'character', 'dialogue', 'parenthetical', 'transition'
+  ]);
+
   static parseScriptContent(scriptContent: any): SceneData[] {
+    // Ensure content is in ProseMirror format (converts legacy TipTap if needed)
+    scriptContent = ensureProsemirrorFormat(scriptContent);
+
     if (!scriptContent || !scriptContent.content || !Array.isArray(scriptContent.content)) {
       return [];
     }
@@ -102,9 +124,10 @@ export class ScriptParsingService {
     let isFirstScene = true;
 
     for (const node of scriptContent.content) {
-      if (node.type !== 'paragraph') continue;
+      // Skip nodes that are not known screenplay types
+      if (!this.SCREENPLAY_NODE_TYPES.has(node.type)) continue;
 
-      // Get text content (empty paragraphs count as blank lines)
+      // Get text content (empty nodes count as blank lines)
       const text = node.content
         ? node.content
             .filter((c: any) => c.type === 'text')
@@ -112,10 +135,10 @@ export class ScriptParsingService {
             .join('')
         : '';
 
-      const className = node.attrs?.class || '';
+      const nodeType = node.type;
 
       // Scene heading detection
-      if (className === 'scene-heading' || (text && this.isSceneHeading(text))) {
+      if (nodeType === 'sceneHeading' || (text && this.isSceneHeading(text))) {
         // Save previous scene if exists
         if (currentScene && currentScene.heading) {
           scenes.push(this.completeScene(currentScene, sceneNumber - 1));
@@ -132,15 +155,15 @@ export class ScriptParsingService {
         // First scene has 0 top margin, subsequent scenes have 3em
         const topMargin = isFirstScene ? this.SPACING.sceneHeadingFirstTop : this.SPACING.sceneHeadingTop;
         currentScene._lines = topMargin + 1; // text line
-        currentScene._prevType = 'scene-heading';
+        currentScene._prevType = 'sceneHeading';
         currentScene._prevBottom = this.SPACING.sceneHeadingBottom;
         isFirstScene = false;
       }
 
       // Action/description content
-      else if (className === 'action' && currentScene) {
+      else if (nodeType === 'action' && currentScene) {
         currentScene.action_content = (currentScene.action_content || '') + text + '\n\n';
-        const topMargin = currentScene._prevType === 'scene-heading'
+        const topMargin = currentScene._prevType === 'sceneHeading'
           ? this.SPACING.actionAfterHeadingTop
           : this.SPACING.actionTop;
         const spacing = this.collapsedMargin(currentScene._prevBottom || 0, topMargin);
@@ -151,7 +174,7 @@ export class ScriptParsingService {
       }
 
       // Character names
-      else if (className === 'character-name' && currentScene) {
+      else if (nodeType === 'character' && currentScene) {
         const character = normalizeCharacterName(text);
         if (character && !currentScene.characters!.includes(character)) {
           currentScene.characters!.push(character);
@@ -159,12 +182,12 @@ export class ScriptParsingService {
         currentScene.action_content = (currentScene.action_content || '') + text.toUpperCase() + '\n';
         const spacing = this.collapsedMargin(currentScene._prevBottom || 0, this.SPACING.characterTop);
         currentScene._lines = (currentScene._lines || 0) + spacing + 1; // always 1 text line
-        currentScene._prevType = 'character-name';
+        currentScene._prevType = 'character';
         currentScene._prevBottom = this.SPACING.characterBottom;
       }
 
       // Parenthetical
-      else if (className === 'parenthetical' && currentScene) {
+      else if (nodeType === 'parenthetical' && currentScene) {
         currentScene.action_content = (currentScene.action_content || '') + `(${text})\n`;
         const spacing = this.collapsedMargin(currentScene._prevBottom || 0, this.SPACING.parentheticalTop);
         const textLines = this.wrapLines(text, this.PARENTHETICAL_CHARS_PER_LINE);
@@ -174,7 +197,7 @@ export class ScriptParsingService {
       }
 
       // Dialogue
-      else if (className === 'dialogue' && currentScene) {
+      else if (nodeType === 'dialogue' && currentScene) {
         currentScene.dialogue_count = (currentScene.dialogue_count || 0) + 1;
         currentScene.action_content = (currentScene.action_content || '') + text + '\n\n';
         const spacing = this.collapsedMargin(currentScene._prevBottom || 0, this.SPACING.dialogueTop);
@@ -185,19 +208,13 @@ export class ScriptParsingService {
       }
 
       // Transition
-      else if (className === 'transition' && currentScene) {
+      else if (nodeType === 'transition' && currentScene) {
         currentScene.action_content = (currentScene.action_content || '') + text.toUpperCase() + '\n\n';
         const spacing = this.collapsedMargin(currentScene._prevBottom || 0, this.SPACING.transitionTop);
         const textLines = this.wrapLines(text, this.ACTION_CHARS_PER_LINE);
         currentScene._lines = (currentScene._lines || 0) + spacing + textLines;
         currentScene._prevType = 'transition';
         currentScene._prevBottom = this.SPACING.transitionBottom;
-      }
-
-      // Empty paragraphs or unrecognized types within a scene count as blank lines
-      else if (currentScene && !className) {
-        currentScene._lines = (currentScene._lines || 0) + 1;
-        currentScene._prevBottom = 0;
       }
     }
 
@@ -213,8 +230,7 @@ export class ScriptParsingService {
    * Check if text looks like a scene heading
    */
   private static isSceneHeading(text: string): boolean {
-    const sceneHeadingPattern = /^(INT\.|EXT\.|INTERIOR|EXTERIOR)/i;
-    return sceneHeadingPattern.test(text.trim());
+    return isSceneHeadingText(text);
   }
 
   /**
@@ -222,46 +238,13 @@ export class ScriptParsingService {
    */
   private static parseSceneHeading(heading: string): Partial<SceneData> {
     const trimmed = heading.trim();
-    
-    // Extract INT/EXT
-    const intExtMatch = trimmed.match(/^(INT\.|EXT\.|INTERIOR|EXTERIOR)/i);
-    const int_ext = intExtMatch ? 
-      (intExtMatch[1].toLowerCase().startsWith('int') ? 'INT' : 'EXT') as 'INT' | 'EXT'
-      : 'INT';
-
-    // Extract time of day
-    const timePattern = /(DAY|NIGHT|DAWN|DUSK|MORNING|EVENING|AFTERNOON)/i;
-    const timeMatch = trimmed.match(timePattern);
-    let time_of_day: 'day' | 'night' | 'dawn' | 'dusk' = 'day';
-    
-    if (timeMatch) {
-      const timeStr = timeMatch[1].toLowerCase();
-      if (timeStr.includes('night') || timeStr.includes('evening')) {
-        time_of_day = 'night';
-      } else if (timeStr.includes('dawn') || timeStr.includes('morning')) {
-        time_of_day = 'dawn';
-      } else if (timeStr.includes('dusk')) {
-        time_of_day = 'dusk';
-      }
-    }
-
-    // Extract location (everything between INT/EXT and time)
-    let location = trimmed;
-    if (intExtMatch) {
-      location = location.replace(intExtMatch[0], '').trim();
-    }
-    if (timeMatch) {
-      location = location.replace(timeMatch[0], '').trim();
-    }
-    
-    // Clean up location (remove common separators)
-    location = location.replace(/^[-–—.]\s*/, '').replace(/\s*[-–—.]\s*$/, '').trim();
+    const parsed = parseSceneHeadingIdentity(trimmed);
 
     return {
       heading: trimmed,
-      location: location || 'UNKNOWN LOCATION',
-      time_of_day,
-      int_ext
+      location: parsed?.location || 'UNKNOWN LOCATION',
+      time_of_day: parsed?.timeOfDay || 'day',
+      int_ext: parsed?.intExt || 'INT',
     };
   }
 
@@ -269,9 +252,9 @@ export class ScriptParsingService {
    * Complete scene data with calculated fields
    */
   private static completeScene(scene: Partial<SceneData> & { _lines?: number; _prevType?: string; _prevBottom?: number }, sceneNumber: number): SceneData {
-    // Convert line count to pages (36 lines per page, matching TipTap pagination)
+    // Convert line count to pages (54 lines per page, matching ProseMirror pagination)
     const lines = scene._lines || 0;
-    const estimatedPages = Math.max(0.125, lines / this.LINES_PER_PAGE); // Minimum 1/8 page
+    const estimatedPages = lines / this.LINES_PER_PAGE;
 
     return {
       scene_number: scene.scene_number || sceneNumber,
@@ -385,7 +368,7 @@ export class ScriptParsingService {
         script = Array.isArray(scripts) ? scripts[0] : scripts;
       }
 
-      // Always parse from TipTap content for accurate page estimation.
+      // Always parse from ProseMirror content for accurate page estimation.
       // The scenes cache may have stale estimated_pages from an older formula.
       let scenes: SceneData[] = this.parseScriptContent(script.content);
 

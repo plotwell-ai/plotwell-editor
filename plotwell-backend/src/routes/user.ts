@@ -10,6 +10,7 @@ const stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2025-08-27.basil',
 });
 import { stripeService } from '../services/stripeService';
+const DEBUG_AI = process.env.DEBUG_AI === 'true';
 
 const router = express.Router();
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
@@ -71,74 +72,31 @@ router.get('/subscription', requireAuth, async (req, res) => {
     }
 
     // Use PricingService to get accurate subscription data including collaborator count
-    const response = await pricingService.getUserSubscription(userId);
+    let response = await pricingService.getUserSubscription(userId);
 
-    // If the user shows as free plan but might have a Stripe subscription, try to sync
-    if (response.plan_id === 'free') {
-      try {
-        // Check if user has Stripe subscription that wasn't synced
-        const { data: userData } = await supabase
-          .from('users')
-          .select('stripe_customer_id, stripe_subscription_id')
-          .eq('id', userId)
-          .single();
+    // Safety net: always sync with Stripe to catch missed webhooks
+    // Handles both directions: DB=free but Stripe=active, and DB=paid but Stripe=cancelled
+    try {
+      const { isPaidSubscription } = require('../utils/subscriptionHelpers');
+      const syncResult = await stripeService.getSubscriptionStatus(userId);
+      const dbSaysPaid = isPaidSubscription({ plan_id: response.plan_id, status: response.subscription_status });
+      const stripeSaysPaid = isPaidSubscription({ plan_id: syncResult.plan_id, status: syncResult.subscription_status });
 
-        if (userData?.stripe_subscription_id) {
-          // Use the fix-subscription endpoint logic to sync
-          const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-          const subscription = await stripe.subscriptions.retrieve(userData.stripe_subscription_id, {
-            expand: ['items.data.price']
-          });
-
-          if (subscription.status === 'active') {
-            // Extract plan from subscription
-            const priceId = subscription.items.data[0].price.id;
-            let planId = 'paid'; // Default for new simplified model
-
-            // Get period timestamps from subscription items (not top-level subscription)
-            const subscriptionItem = subscription.items.data[0];
-            const currentPeriodStart = subscriptionItem.current_period_start;
-            const currentPeriodEnd = subscriptionItem.current_period_end;
-
-            const dataToUpsert = {
-              user_id: userId,
-              plan_id: planId,
-              status: subscription.status,
-              stripe_subscription_id: subscription.id,
-              current_period_start: currentPeriodStart ? new Date(currentPeriodStart * 1000).toISOString() : null,
-              current_period_end: currentPeriodEnd ? new Date(currentPeriodEnd * 1000).toISOString() : null,
-              cancel_at_period_end: subscription.cancel_at_period_end || false,
-              plan_price: subscription.plan?.amount || 900,
-              plan_currency: subscription.currency || 'eur',
-              updated_at: new Date().toISOString()
-            };
-
-            // Update user subscription
-            const { error: upsertError } = await supabase
-              .from('user_subscriptions')
-              .upsert(dataToUpsert, { onConflict: 'user_id' });
-
-            if (!upsertError) {
-              // Re-fetch the updated subscription
-              const updatedResponse = await pricingService.getUserSubscription(userId);
-              res.json({
-                success: true,
-                subscription: updatedResponse,
-                synced: true
-              });
-              return;
-            }
-          }
-        }
-      } catch (syncError) {
-        console.error('Error syncing subscription:', syncError);
-        // Continue with original response if sync fails
+      if (dbSaysPaid !== stripeSaysPaid) {
+        // getSubscriptionStatus already synced the DB, just re-fetch
+        response = await pricingService.getUserSubscription(userId);
       }
+    } catch (syncError) {
+      console.error('Error syncing subscription:', syncError);
     }
+
+    // Check trial eligibility so frontend can show "14-day free trial" badge
+    const eligibleForTrial = await stripeService.checkTrialEligibility(userId);
 
     res.json({
       success: true,
-      subscription: response
+      subscription: response,
+      eligible_for_trial: eligibleForTrial
     });
 
   } catch (error) {
@@ -187,11 +145,10 @@ router.get('/subscription/addons', requireAuth, async (req, res) => {
         const subscription = await stripeClient.subscriptions.retrieve(subscriptionData.stripe_subscription_id, {
           expand: ['items.data.price']
         });
-        const basePriceItem = subscription.items.data.find((item: any) => {
-          const priceId = item.price.id;
-          return priceId === currentPriceIds.paid_monthly || priceId === currentPriceIds.paid_yearly;
-        });
-        if (basePriceItem?.price.recurring?.interval === 'year') {
+        const hasYearlyItem = subscription.items.data.some((item: any) =>
+          item.price.recurring?.interval === 'year'
+        );
+        if (hasYearlyItem) {
           billingCycle = 'yearly';
         }
       } catch (err) {
@@ -956,7 +913,7 @@ router.put('/marketing-consent', requireAuth, async (req, res) => {
       return res.status(500).json({ error: 'Failed to update marketing consent' });
     }
 
-    console.log(`📧 Marketing consent ${consent ? 'granted' : 'revoked'} for user ${userId}`);
+    if (DEBUG_AI) console.log(`📧 Marketing consent ${consent ? 'granted' : 'revoked'} for user ${userId}`);
     res.json({ success: true, ...data });
   } catch (error) {
     console.error('Error in PUT /marketing-consent:', error);
@@ -1098,7 +1055,7 @@ router.get('/projects-tour', requireAuth, async (req, res) => {
       .from('users')
       .select('projects_tour_completed_at')
       .eq('id', userId)
-      .single();
+      .maybeSingle();
 
     if (error) {
       console.error('Error fetching projects tour status:', error);
@@ -1165,7 +1122,7 @@ router.delete('/delete-account', requireAuth, async (req, res) => {
       return res.status(401).json({ error: 'User not authenticated properly' });
     }
 
-    console.log('🗑️ DELETE ACCOUNT REQUEST for user:', userId);
+    if (DEBUG_AI) console.log('🗑️ DELETE ACCOUNT REQUEST for user:', userId);
 
     // Get user's Stripe data before deletion
     const { data: userData, error: userFetchError } = await supabase
@@ -1186,7 +1143,7 @@ router.delete('/delete-account', requireAuth, async (req, res) => {
     if (userData?.stripe_customer_id) {
       try {
         const stripeResult = await stripeService.deleteCustomerAndSubscriptions(userData.stripe_customer_id);
-        console.log('✅ Stripe cleanup result:', {
+        if (DEBUG_AI) console.log('✅ Stripe cleanup result:', {
           subscriptionsCancelled: stripeResult.subscriptionsCancelled,
           customerDeleted: stripeResult.customerDeleted,
           errors: stripeResult.errors.length > 0 ? stripeResult.errors : 'none'
@@ -1196,7 +1153,7 @@ router.delete('/delete-account', requireAuth, async (req, res) => {
         // Continue with deletion even if Stripe cleanup fails
       }
     } else {
-      console.log('ℹ️ No Stripe customer ID found, skipping Stripe cleanup');
+      if (DEBUG_AI) console.log('ℹ️ No Stripe customer ID found, skipping Stripe cleanup');
     }
 
     // Step 2: Delete user data from public tables first
@@ -1211,7 +1168,7 @@ router.delete('/delete-account', requireAuth, async (req, res) => {
       console.error('⚠️ Error deleting projects:', projectsDeleteError.message);
       // Continue - may not have projects
     } else {
-      console.log('✅ User projects deleted');
+      if (DEBUG_AI) console.log('✅ User projects deleted');
     }
 
     // Delete user subscriptions
@@ -1267,7 +1224,7 @@ router.delete('/delete-account', requireAuth, async (req, res) => {
       console.error('⚠️ Error deleting from public.users:', publicUserDeleteError.message);
       // This might fail if FK constraints exist - continue anyway
     } else {
-      console.log('✅ Public user record deleted');
+      if (DEBUG_AI) console.log('✅ Public user record deleted');
     }
 
     // Step 4: Delete user from Supabase Auth
@@ -1281,7 +1238,7 @@ router.delete('/delete-account', requireAuth, async (req, res) => {
       });
     }
 
-    console.log('✅ Account deleted successfully for user:', userId);
+    if (DEBUG_AI) console.log('✅ Account deleted successfully for user:', userId);
 
     res.json({
       success: true,
@@ -1479,7 +1436,7 @@ router.post('/invalidate-sessions', requireAuth, async (req, res) => {
       return res.status(500).json({ error: 'Failed to invalidate sessions' });
     }
 
-    console.log(`✅ Sessions invalidated for user ${userId.slice(0, 8)}***`);
+    if (DEBUG_AI) console.log(`✅ Sessions invalidated for user ${userId.slice(0, 8)}***`);
     res.json({ success: true, message: 'All other sessions have been invalidated' });
 
   } catch (error: any) {

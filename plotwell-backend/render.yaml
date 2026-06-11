@@ -1,0 +1,102 @@
+services:
+  # Development Environment
+  - type: web
+    name: plotwell-backend-dev
+    runtime: node
+    branch: dev
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 24
+      - key: NODE_ENV
+        value: development
+      - key: FRONTEND_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: REPLICATE_API_TOKEN
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_PAID_MONTHLY_PRICE_ID
+        sync: false
+      - key: STRIPE_PAID_YEARLY_PRICE_ID
+        sync: false
+      - key: STRIPE_ADDON_PROJECT_PRICE_ID
+        sync: false
+      - key: STRIPE_ADDON_COLLABORATOR_PRICE_ID
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: LOG_LEVEL
+        value: debug
+      - key: ENABLE_REQUEST_LOGGING
+        value: true
+      - key: RATE_LIMIT_ENABLED
+        value: false
+      - key: PORT
+        value: 10000
+
+  # Production Environment
+  - type: web
+    name: plotwell-backend-prod
+    runtime: node
+    branch: main
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 24
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: REPLICATE_API_TOKEN
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_PAID_MONTHLY_PRICE_ID
+        sync: false
+      - key: STRIPE_PAID_YEARLY_PRICE_ID
+        sync: false
+      - key: STRIPE_ADDON_PROJECT_PRICE_ID
+        sync: false
+      - key: STRIPE_ADDON_COLLABORATOR_PRICE_ID
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: LOG_LEVEL
+        value: error
+      - key: ENABLE_REQUEST_LOGGING
+        value: false
+      - key: RATE_LIMIT_ENABLED
+        value: true
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: 100
+      - key: RATE_LIMIT_WINDOW_MS
+        value: 900000
+      - key: PORT
+        value: 10000

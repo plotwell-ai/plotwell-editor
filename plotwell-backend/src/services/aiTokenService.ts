@@ -1,6 +1,7 @@
 // AI Token Management Service
 // Dynamically calculates optimal token limits based on project content and context
 import { extractTextFromTipTapJSON } from '../utils/aiHelpers';
+import { isEpisodic } from '../utils/projectType';
 
 export interface ProjectContext {
   projectType: 'film' | 'series';
@@ -123,9 +124,9 @@ export class AITokenService {
     let baseTokens: number;
     let reasoning = `${projectType} project`;
 
-    if (projectType === 'series') {
+    if (isEpisodic(projectType)) {
       baseTokens = this.BASE_LIMITS['script-series'];
-      reasoning += ' - TV series episode';
+      reasoning += ' - episodic series episode';
     } else {
       // Default to feature for films
       baseTokens = this.BASE_LIMITS['script-feature'];
@@ -310,7 +311,7 @@ export class AITokenService {
 
     let text = '';
     
-    // Extract text from TipTap JSON structure
+    // Extract text from ProseMirror JSON structure
     if (content.content && Array.isArray(content.content)) {
       text = extractTextFromTipTapJSON(content, 'plain');
     } else if (typeof content === 'string') {
@@ -336,15 +337,15 @@ export class AITokenService {
   private static countSceneHeadings(scriptContent: any): number {
     if (!scriptContent?.content) return 0;
     
-    return scriptContent.content.filter((block: any) => 
-      block.attrs?.class?.includes('scene-heading')
+    return scriptContent.content.filter((block: any) =>
+      block.type === 'sceneHeading'
     ).length;
   }
 
-  // extractTextFromContent replaced by unified extractTextFromTipTapJSON from aiHelpers
+  // extractTextFromContent replaced by unified extractTextFromTipTapJSON from aiHelpers (handles both formats)
 
   /**
-   * Extract text content from document (TipTap JSON or string)
+   * Extract text content from document (ProseMirror JSON or string)
    */
   private static extractDocumentText(content: any): string {
     if (!content) return '';
@@ -353,7 +354,7 @@ export class AITokenService {
       return content;
     }
     
-    // Handle TipTap JSON structure
+    // Handle ProseMirror JSON structure
     if (content.content && Array.isArray(content.content)) {
       return extractTextFromTipTapJSON(content, 'plain');
     }

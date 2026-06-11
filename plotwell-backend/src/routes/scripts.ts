@@ -1,13 +1,25 @@
 import { Router } from "express";
 import { createClient } from "@supabase/supabase-js";
 import { extractUserId, PricingRequest } from "../middleware/pricingMiddleware";
-import { PricingService } from "../services/pricingService";
 import { Request, Response, NextFunction } from "express";
 import { ScriptTimingService } from "../services/scriptTimingService";
 import { ScriptExportService } from "../services/scriptExportService";
 import { invalidateSceneCache, parseScriptContent } from "../services/scriptParsingService";
 import { syncStoryboardSceneIds } from "../services/sceneIdentityService";
+import { createScriptVersionSnapshot } from "../services/scriptVersionService";
+import {
+  applyScriptContentToActiveRoom,
+  flushActiveScriptRoomToDatabase,
+  getActiveScriptRoomContent,
+  hasActiveCollaborationRoom,
+  invalidateCollaborationDocumentState,
+  isEmptyProseMirrorDoc,
+  replaceActiveScriptRoomContent,
+} from "../services/collaborationServer";
 import { requireAuth, checkProjectAccess } from "../middleware/auth";
+import { isEpisodic } from "../utils/projectType";
+import { detectWholeDocumentDuplication } from "../utils/scriptContentGuard";
+const DEBUG_AI = process.env.DEBUG_AI === 'true';
 
 const router = Router();
 
@@ -102,7 +114,8 @@ function checkScriptAccess(requireWrite: boolean = false) {
 }
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
-// Middleware to check version control access for script endpoints
+// Middleware to check version history access for script endpoints.
+// Version history is a safety/recovery feature, so it is available on all plans.
 const requireScriptVersionControl = async (req: PricingRequest, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
@@ -139,11 +152,9 @@ const requireScriptVersionControl = async (req: PricingRequest, res: Response, n
       return res.status(500).json({ error: 'Internal server error' });
     }
 
-    let targetUserId = userId;
-    let isCollaborator = false;
-    
     if (project.user_id === userId) {
-      // User owns the project - use their subscription
+      req.project_id = projectId;
+      return next();
     } else {
       // Check if user is a collaborator
       const { data: collaborator, error: collabError } = await supabase
@@ -157,24 +168,8 @@ const requireScriptVersionControl = async (req: PricingRequest, res: Response, n
       if (collabError || !collaborator) {
         return res.status(403).json({ error: 'Access denied' });
       }
-
-      // User is collaborator - check project owner's subscription
-      targetUserId = project.user_id;
-      isCollaborator = true;
     }
 
-    // Check version control subscription - use unified paid plan check
-    const pricingService = new PricingService(supabase);
-    const hasPaidPlan = await pricingService.hasPaidPlan(targetUserId);
-
-    if (!hasPaidPlan) {
-      return res.status(403).json({
-        error: 'Version control requires a Pro plan',
-        feature: 'version_control'
-      });
-    }
-
-    
     // Store project_id for endpoint handlers to use
     req.project_id = projectId;
     
@@ -207,6 +202,8 @@ const RETENTION_CONFIG = {
   maxVersionsPerScript: 500, // Hard limit for runaway cases
   minVersionsToKeep: 10 // Never go below this number
 };
+
+const AUTO_VERSION_INTERVAL_MINUTES = 1;
 
 // Helper function to calculate change significance
 function calculateChangeSignificance(oldContent: any, newContent: any): number {
@@ -385,41 +382,19 @@ async function deleteVersions(versionIds: string[]) {
 }
 
 // Helper function to create a script version
-async function createScriptVersion(scriptId: string, userId: string, changeSummary: string = 'Auto-save') {
+async function createScriptVersion(
+  scriptId: string,
+  userId: string,
+  changeSummary: string = 'Auto-save',
+  options: { skipIfUnchanged?: boolean } = {}
+) {
   try {
-    // Get current script data
-    const { data: currentScript, error: scriptError } = await supabase
-      .from('scripts')
-      .select('content')
-      .eq('id', scriptId)
-      .single();
-
-    if (scriptError) throw new Error('Script not found');
-
-    // Get next version number
-    const { data: lastVersion, error: versionError } = await supabase
-      .from('script_versions')
-      .select('version_number')
-      .eq('script_id', scriptId)
-      .order('version_number', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const nextVersion = (lastVersion?.version_number || 0) + 1;
-
-    // Create version
-    const { error: insertError } = await supabase
-      .from('script_versions')
-      .insert({
-        script_id: scriptId,
-        version_number: nextVersion,
-        title: 'Script',
-        content: currentScript.content,
-        change_summary: changeSummary,
-        created_by: userId
-      });
-
-    if (insertError) throw new Error('Failed to create version');
+    const nextVersion = await createScriptVersionSnapshot(supabase, {
+      scriptId,
+      userId,
+      changeSummary,
+      skipIfUnchanged: options.skipIfUnchanged,
+    });
     
     // Cleanup old versions after successful creation
     await cleanupOldVersions(scriptId);
@@ -452,13 +427,13 @@ router.get("/", requireAuth, checkProjectAccess, async (req, res) => {
     return res.status(500).json({ error: projectError.message });
   }
 
-  const isSeries = project.project_type === 'series';
+  const isSeries = isEpisodic(project.project_type);
 
   // Build query - exclude content if include_content=false (saves ~68% of query time)
   const shouldIncludeContent = include_content !== 'false';
   const selectFields = shouldIncludeContent
-    ? "id, title, content, created_at, is_ai_generated, episode_id"
-    : "id, title, created_at, is_ai_generated, episode_id";
+    ? "id, title, content, created_at, updated_at, is_ai_generated, episode_id"
+    : "id, title, created_at, updated_at, is_ai_generated, episode_id";
 
   let query = supabase
     .from("scripts")
@@ -522,6 +497,13 @@ router.get("/:id", requireAuth, checkScriptAccess(false), async (req, res) => {
       return res.status(404).json({ error: "Script not found" });
     }
 
+    if (hasActiveCollaborationRoom(script.project_id, 'script', id)) {
+      const activeContent = getActiveScriptRoomContent(script.project_id, id);
+      if (activeContent && !isEmptyProseMirrorDoc(activeContent)) {
+        script.content = activeContent;
+      }
+    }
+
     res.json({ script });
   } catch (error: any) {
     console.error('Error fetching script:', error);
@@ -555,7 +537,7 @@ router.post("/", requireAuth, checkProjectAccess, async (req, res) => {
     });
   }
 
-  const isSeries = existingProject.project_type === 'series';
+  const isSeries = isEpisodic(existingProject.project_type);
 
   // For TV series, check if this is the first script for THIS EPISODE
   // For movies, check if this is the first script for the PROJECT
@@ -630,13 +612,22 @@ router.post("/", requireAuth, checkProjectAccess, async (req, res) => {
 // Update a script (content and/or title)
 router.put("/:id", requireAuth, checkScriptAccess(true), extractUserId, async (req: PricingRequest, res) => {
   const { id } = req.params;
-  const { content, title, change_summary, create_version = false } = req.body;
-  if (!content && !title) return res.status(400).json({ error: "Nothing to update" });
+  const {
+    content,
+    title,
+    page_count,
+    change_summary,
+    create_version = false,
+    preserve_collaboration_state = false,
+  } = req.body;
+  if (content === undefined && title === undefined && page_count === undefined) {
+    return res.status(400).json({ error: "Nothing to update" });
+  }
 
   // Check if the script's project is archived
   const { data: script, error: scriptError } = await supabase
     .from("scripts")
-    .select("project_id, episode_id")
+    .select("project_id, episode_id, content")
     .eq("id", id)
     .single();
 
@@ -657,14 +648,36 @@ router.put("/:id", requireAuth, checkScriptAccess(true), extractUserId, async (r
     });
   }
 
+  let effectiveContent = content;
+  let blockedDuplicatedContent = false;
+
+  if (content !== undefined) {
+    const duplication = detectWholeDocumentDuplication(script.content, content);
+    if (duplication.duplicated) {
+      blockedDuplicatedContent = true;
+      effectiveContent = script.content;
+      console.warn('Blocked duplicated script content update:', {
+        scriptId: id,
+        projectId: script.project_id,
+        repeatCount: duplication.repeatCount,
+      });
+    }
+  }
+
+  const hasActiveRoomForContent = content !== undefined
+    && !blockedDuplicatedContent
+    && hasActiveCollaborationRoom(script.project_id, 'script', id);
+
   // Smart version creation logic:
   // 1. Always create version if explicitly requested (create_version=true)
   // 2. Always create version for manual edits with custom change_summary
-  // 3. For auto-saves, only create version if 5+ minutes since last version
-  let shouldCreateVersion = create_version || (change_summary && change_summary !== 'Auto-save');
+  // 3. For auto-saves, create periodic versions and skip duplicates
+  const isContentUpdate = content !== undefined && !blockedDuplicatedContent;
+  const effectiveChangeSummary = change_summary || (isContentUpdate ? 'Auto-save' : undefined);
+  let shouldCreateVersion = create_version || (effectiveChangeSummary && effectiveChangeSummary !== 'Auto-save');
 
-  if (!shouldCreateVersion && change_summary === 'Auto-save') {
-    // Check if we should create a periodic auto-version (every 5 minutes)
+  if (!shouldCreateVersion && effectiveChangeSummary === 'Auto-save') {
+    // Check if we should create a periodic auto-version.
     const { data: lastVersion } = await supabase
       .from('script_versions')
       .select('created_at')
@@ -681,17 +694,18 @@ router.put("/:id", requireAuth, checkScriptAccess(true), extractUserId, async (r
       const now = new Date().getTime();
       const minutesSinceLastVersion = (now - lastVersionTime) / (1000 * 60);
 
-      // Create auto-version every 5 minutes
-      if (minutesSinceLastVersion >= 5) {
+      if (minutesSinceLastVersion >= AUTO_VERSION_INTERVAL_MINUTES) {
         shouldCreateVersion = true;
       }
     }
   }
 
-  if (shouldCreateVersion) {
+  if (shouldCreateVersion && !hasActiveRoomForContent) {
     try {
       const userId = req.userId;
-      await createScriptVersion(id, userId, change_summary || 'Manual edit');
+      await createScriptVersion(id, userId, effectiveChangeSummary || 'Manual edit', {
+        skipIfUnchanged: effectiveChangeSummary === 'Auto-save',
+      });
     } catch (error) {
       console.error('Failed to create version backup:', error);
       // Continue with update even if version creation fails
@@ -700,17 +714,79 @@ router.put("/:id", requireAuth, checkScriptAccess(true), extractUserId, async (r
 
   // Build update object
   const updateData: any = {};
-  if (content) updateData.content = content;
+  if (content !== undefined && !blockedDuplicatedContent) {
+    if (script.content && !isEmptyProseMirrorDoc(script.content) && isEmptyProseMirrorDoc(effectiveContent)) {
+      return res.status(400).json({
+        error: "Refusing to overwrite non-empty script with empty content",
+      });
+    }
+
+    if (!hasActiveRoomForContent) {
+      updateData.content = effectiveContent;
+    }
+  }
   if (title !== undefined) updateData.title = title;
+  if (page_count !== undefined && Number.isInteger(page_count) && page_count > 0) {
+    updateData.page_count = page_count;
+  }
 
-  const { data, error } = await supabase
-    .from("scripts")
-    .update(updateData)
-    .eq("id", id)
-    .select()
-    .single();
+  let data: any = null;
+  if (Object.keys(updateData).length > 0) {
+    const { data: updatedData, error } = await supabase
+      .from("scripts")
+      .update(updateData)
+      .eq("id", id)
+      .select()
+      .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+    if (error) return res.status(500).json({ error: error.message });
+    data = updatedData;
+  } else {
+    const { data: currentData, error } = await supabase
+      .from("scripts")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    data = currentData;
+  }
+
+  if (content !== undefined) {
+    if (blockedDuplicatedContent) {
+      if (hasActiveCollaborationRoom(script.project_id, 'script', id) && script.content) {
+        replaceActiveScriptRoomContent(script.project_id, id, script.content);
+      }
+      data = {
+        ...data,
+        content: script.content,
+        duplicate_content_blocked: true,
+      };
+    } else if (hasActiveRoomForContent) {
+      if (shouldCreateVersion) {
+        await flushActiveScriptRoomToDatabase(script.project_id, id, {
+          userId: req.userId,
+          changeSummary: effectiveChangeSummary || 'Before external script update',
+          createVersion: true,
+        });
+      }
+
+      const result = await applyScriptContentToActiveRoom(script.project_id, id, effectiveContent, {
+        userId: req.userId,
+        changeSummary: effectiveChangeSummary || 'External script update',
+        createVersion: false,
+        flush: true,
+      });
+      data = {
+        ...data,
+        content: result.content || effectiveContent,
+      };
+    } else if (preserve_collaboration_state) {
+      replaceActiveScriptRoomContent(script.project_id, id, effectiveContent);
+    } else {
+      await invalidateCollaborationDocumentState(script.project_id, 'script', id);
+    }
+  }
 
   // Invalidate scene cache so production planner gets fresh scene data
   try {
@@ -721,9 +797,9 @@ router.put("/:id", requireAuth, checkScriptAccess(true), extractUserId, async (r
   }
 
   // Sync storyboard panel scene_ids if content changed (handles scene renames)
-  if (content) {
+  if (effectiveContent && !blockedDuplicatedContent) {
     try {
-      const scenes = parseScriptContent(content);
+      const scenes = parseScriptContent(effectiveContent);
       if (scenes.length > 0) {
         const syncResult = await syncStoryboardSceneIds(
           script.project_id,
@@ -732,7 +808,7 @@ router.put("/:id", requireAuth, checkScriptAccess(true), extractUserId, async (r
           script.episode_id
         );
         if (syncResult.updated > 0) {
-          console.log(`🔄 STORYBOARD SYNC: Re-linked ${syncResult.updated} scene(s), ${syncResult.orphaned} orphaned`);
+          if (DEBUG_AI) console.log(`🔄 STORYBOARD SYNC: Re-linked ${syncResult.updated} scene(s), ${syncResult.orphaned} orphaned`);
         }
       }
     } catch (syncError) {
@@ -774,7 +850,7 @@ router.delete("/:id", requireAuth, checkScriptAccess(true), async (req, res) => 
     });
   }
 
-  const isSeries = existingProject.project_type === 'series';
+  const isSeries = isEpisodic(existingProject.project_type);
 
   // Check if this is a production script and warn/prevent deletion
   const isProductionScript = existingProject.prod_script_id === id;
@@ -862,7 +938,7 @@ router.post("/:id/promote", requireAuth, checkScriptAccess(true), async (req, re
   }
 
   // Handle TV series (project_type === 'series') differently than movies
-  const isSeries = existingProject.project_type === 'series';
+  const isSeries = isEpisodic(existingProject.project_type);
   const scriptEpisodeId = episode_id || script.episode_id;
 
   if (isSeries && scriptEpisodeId) {
@@ -1199,6 +1275,8 @@ router.post("/:id/versions/:version/restore", extractUserId, requireScriptVersio
       .single();
 
     if (updateError) return res.status(500).json({ error: updateError.message });
+
+    await invalidateCollaborationDocumentState(projectId, 'script', id);
 
     // Invalidate scene cache since content changed
     try {

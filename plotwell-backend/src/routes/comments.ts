@@ -1,8 +1,7 @@
 import { Router, Request, Response } from "express";
 import { createClient } from "@supabase/supabase-js";
 import { requireAuth } from "../middleware/auth";
-import { extractUserId, PricingRequest } from "../middleware/pricingMiddleware";
-import { PricingService } from '../services/pricingService';
+import { extractUserId } from "../middleware/pricingMiddleware";
 import { validateCommentInput } from "../middleware/inputValidation";
 
 const router = Router();
@@ -19,36 +18,8 @@ const supabase = createClient(
   }
 );
 
-// Custom middleware for comments feature access (Teams plan and above)
-const requireCommentsAccess = async (req: PricingRequest, res: Response, next: any) => {
-  try {
-    const userId = req.userId;
-
-    if (!userId) {
-      return res.status(401).json({ error: 'User not authenticated' });
-    }
-
-
-    // Check comments access for the user (Paid plan required)
-    const pricingService = new PricingService(supabase);
-    const hasCommentsAccess = await pricingService.hasPaidPlan(userId);
-
-    if (!hasCommentsAccess) {
-      return res.status(403).json({
-        error: 'Comments feature requires a Pro plan',
-        feature: 'comments'
-      });
-    }
-
-    next();
-  } catch (error) {
-    console.error('Error checking comments access:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
 // Get comments for content (script or document)
-router.get("/:contentType/:contentId", requireAuth, extractUserId, requireCommentsAccess, async (req: Request, res: Response) => {
+router.get("/:contentType/:contentId", requireAuth, extractUserId, async (req: Request, res: Response) => {
   try {
     const { contentType, contentId } = req.params;
     const userId = req.user?.id;
@@ -245,7 +216,7 @@ router.get("/:contentType/:contentId", requireAuth, extractUserId, requireCommen
 });
 
 // Get comment statistics
-router.get("/:contentType/:contentId/stats", requireAuth, extractUserId, requireCommentsAccess, async (req: Request, res: Response) => {
+router.get("/:contentType/:contentId/stats", requireAuth, extractUserId, async (req: Request, res: Response) => {
   try {
     const { contentType, contentId } = req.params;
     const userId = req.user?.id;
@@ -329,7 +300,7 @@ router.get("/:contentType/:contentId/stats", requireAuth, extractUserId, require
 });
 
 // Create a new comment
-router.post("/", requireAuth, extractUserId, requireCommentsAccess, validateCommentInput, async (req: Request, res: Response) => {
+router.post("/", requireAuth, extractUserId, validateCommentInput, async (req: Request, res: Response) => {
   try {
     const userId = req.user?.id;
     if (!userId) {
@@ -435,7 +406,7 @@ router.post("/", requireAuth, extractUserId, requireCommentsAccess, validateComm
 });
 
 // Update a comment
-router.put("/:commentId", requireAuth, extractUserId, requireCommentsAccess, async (req: Request, res: Response) => {
+router.put("/:commentId", requireAuth, extractUserId, async (req: Request, res: Response) => {
   try {
     const { commentId } = req.params;
     const userId = req.user?.id;
@@ -510,8 +481,10 @@ router.put("/:commentId", requireAuth, extractUserId, requireCommentsAccess, asy
       if (!canChangeStatus) {
         return res.status(403).json({ error: "Not authorized to change comment status" });
       }
+    }
 
-      // Track who resolved/dismissed the comment
+    // Track who resolved/dismissed the comment (for both author and non-author)
+    if (status !== undefined) {
       if (status === "resolved" || status === "dismissed") {
         updates.resolved_by = userId;
         updates.resolved_at = new Date().toISOString();
@@ -558,7 +531,7 @@ router.put("/:commentId", requireAuth, extractUserId, requireCommentsAccess, asy
 });
 
 // Delete a comment
-router.delete("/:commentId", requireAuth, extractUserId, requireCommentsAccess, async (req: Request, res: Response) => {
+router.delete("/:commentId", requireAuth, extractUserId, async (req: Request, res: Response) => {
   try {
     const { commentId } = req.params;
     const userId = req.user?.id;
@@ -629,7 +602,7 @@ router.delete("/:commentId", requireAuth, extractUserId, requireCommentsAccess, 
 });
 
 // Add or remove reaction to a comment
-router.post("/:commentId/reactions", requireAuth, extractUserId, requireCommentsAccess, async (req: Request, res: Response) => {
+router.post("/:commentId/reactions", requireAuth, extractUserId, async (req: Request, res: Response) => {
   try {
     const { commentId } = req.params;
     const { reaction_type } = req.body;
@@ -696,7 +669,7 @@ router.post("/:commentId/reactions", requireAuth, extractUserId, requireComments
 });
 
 // Mark comment as read
-router.post("/:commentId/read", requireAuth, extractUserId, requireCommentsAccess, async (req: Request, res: Response) => {
+router.post("/:commentId/read", requireAuth, extractUserId, async (req: Request, res: Response) => {
   try {
     const { commentId } = req.params;
     const userId = req.user?.id;

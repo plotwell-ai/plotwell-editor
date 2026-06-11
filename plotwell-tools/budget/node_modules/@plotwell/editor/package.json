@@ -1,0 +1,59 @@
+{
+  "name": "@plotwell/editor",
+  "version": "0.2.0",
+  "description": "Open source screenplay editor built on ProseMirror. Powered by plotwell.co",
+  "author": "PLOTWELL S.L.U. <hello@plotwell.co> (https://plotwell.co)",
+  "homepage": "https://editor.plotwell.co",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/plotwell-ai/plotwell-editor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/plotwell-ai/plotwell-editor/issues"
+  },
+  "main": "dist/index.cjs.js",
+  "module": "dist/index.esm.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.esm.js",
+      "require": "./dist/index.cjs.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./styles.css": "./src/styles.css"
+  },
+  "files": [
+    "dist",
+    "src/styles.css"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:demo": "vite build --config vite.demo.config.ts",
+    "prepare": "npm run build",
+    "lint": "eslint src"
+  },
+  "keywords": [
+    "screenplay",
+    "editor",
+    "prosemirror",
+    "fountain",
+    "screenwriting",
+    "scriptwriting"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "prosemirror-commands": "^1.5.2",
+    "prosemirror-history": "^1.3.2",
+    "prosemirror-inputrules": "^1.4.0",
+    "prosemirror-keymap": "^1.2.2",
+    "prosemirror-model": "^1.22.3",
+    "prosemirror-schema-basic": "^1.2.3",
+    "prosemirror-state": "^1.4.3",
+    "prosemirror-view": "^1.33.9"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^8.0.3"
+  }
+}
