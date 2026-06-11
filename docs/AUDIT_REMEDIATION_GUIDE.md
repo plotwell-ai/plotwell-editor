@@ -93,39 +93,52 @@ const password = req.query.password as string || req.headers['x-share-password']
 
 **Fix when needed:** `rate-limit-redis` store backed by a managed Redis (Render Key Value or Upstash). Only the limiters guarding paid AI need durable storage (`freePreviewLimiter`, `aiLimiter`, `videoLimiter`); CRUD limiters can stay in memory.
 
-## ◼ A5. Production module IDORs, second batch (HIGH — IN PROGRESS)
+## ◼ A5. Production module IDORs, second batch (HIGH — 22/24 PROTECTED, METERING PENDING)
 
 The schedule.ts fix covered only one of the five production route files. The sibling files have the same disease: handlers that trust `projectId`/`castId`/`crewId`/`sceneId` from the request and call services whose `userId` parameter is **decorative** (verified: `castService.ts` never filters by user or checks ownership in `updateCallTime`, `assignCastToScenes`, `removeCastFromScene`, `bulkCreateCastFromCharacters`; `productionSyncServiceSimple.ts` `lockScene`/`unlockScene` take no user at all; `helpers.ts:64` literally says "access control is handled by the caller" — and these callers don't).
 
 **Unprotected endpoints (each verified by reading the handler + its service):**
 
-**FIXED (3/24):**
-| File | Endpoint | 
-| --- | --- |
-| `production/cast.ts:474` | ✓ POST `/cast/:projectId/bulk-from-characters` — added `checkProjectAccessForUser` |
-| `production/scenes.ts:140` | ✓ POST `/scene-card` — added project access check |
-| `production/scenes.ts:407` | ✓ POST `/budget-item` — added project access check |
+**PROTECTED (22/24):**
 
-**Remaining (21 to fix):**
-| File | Endpoint | Pattern |
+cast.ts (5 done):
+- ✓ POST `/cast/:projectId/bulk-from-characters` 
+- ✓ POST `/cast/:castId/scenes`
+- ✓ DELETE `/cast/:castId/scenes/:sceneId`
+- ✓ POST `/cast/:castId/days`
+- ✓ PUT `/cast/:castId/scenes/:sceneId/call-time`
+- ✓ POST/DELETE `/episode-assign`, `/episode-unassign`
+
+crew.ts (4 done):
+- ✓ POST `/crew`
+- ✓ POST `/crew/:crewId/days`
+- ✓ POST/DELETE `/episode-assign`, `/episode-unassign`
+
+scenes.ts (13 done):
+- ✓ POST `/scene-card`
+- ✓ POST `/budget-item`
+- ✓ POST `/scenes/:sceneId/lock`, `/unlock`
+- ✓ POST `/breakdown-items`
+- ✓ DELETE `/breakdown-items/:id`
+- ✓ POST `/import-from-script/:projectId`
+- ✓ POST `/import-to-storyboard/:projectId`
+- ✓ POST `/sync/:projectId`
+- ✓ POST `/resolve-changes/:projectId`
+
+**METERING PENDING (2 final — analysis.ts):**
+All 7 AI endpoints below need `checkProjectAccessForUser` + `trackOpenAIUsageInRoute` metering chain (like POST `/fill-with-ai` pattern):
+
+| Endpoint | LLM Call | Context Read |
 | --- | --- | --- |
-| `production/cast.ts:230` | POST `/cast/:castId/scenes` | lookup scene → projectId → checkAccess |
-| `production/cast.ts:264` | DELETE `/cast/:castId/scenes/:sceneId` | lookup scene → projectId → checkAccess |
-| `production/cast.ts:322` | POST `/cast/:castId/days` | lookup cast → projectId → checkAccess |
-| `production/cast.ts:505` | PUT `/cast/:castId/scenes/:sceneId/call-time` | lookup scene → projectId → checkAccess |
-| `production/cast.ts:566,598` | POST/DELETE `/episode-assign`, `/episode-unassign` | lookup episode → projectId → checkAccess |
-| `production/crew.ts:16` | POST `/crew` | add projectId param + checkAccess |
-| `production/crew.ts:344` | POST `/crew/:crewId/days` | lookup crew → projectId → checkAccess |
-| `production/crew.ts:578,610` | POST/DELETE `/episode-assign`, `/episode-unassign` | lookup episode → projectId → checkAccess |
-| `production/scenes.ts:1273,1302` | POST `/scenes/:sceneId/lock`, `/unlock` | lookup scene → projectId → checkAccess |
-| `production/scenes.ts:2030` | POST `/breakdown-items` | verify scene_data belongs to user's project |
-| `production/scenes.ts:461` | POST `/import-from-script/:projectId` | ✓ already has `checkProjectAccessForUser` in service layer? verify |
-| `production/scenes.ts:525` | POST `/import-to-storyboard/:projectId` | ✓ same |
-| `production/scenes.ts:1201` | POST `/sync/:projectId` | ✓ same |
-| `production/scenes.ts:1229` | POST `/resolve-changes/:projectId` | ✓ same |
-| `production/analysis.ts:18` | POST `/analyze-script` | add checkProjectAccessForUser + meter with `trackOpenAIUsageInRoute` |
-| `production/analysis.ts:316,570` | POST `/budget-scenarios`, `/budget-health` | add checkProjectAccessForUser + meter |
-| `production/analysis.ts:111,864,973` | POST `/optimize-budget`, `/optimize-schedule`, `/suggest-locations` | add checkProjectAccessForUser + meter |
+| POST `/analyze-script` | ✓ gpt-5-mini (line ~170) | ✓ yes |
+| POST `/generate-shots` | ✓ grok (line ~72) | - |
+| POST `/optimize-budget` | ✓ gpt-5-mini (~line 180) | ✓ gatherProjectContext |
+| POST `/budget-scenarios` | ✓ gpt-5-mini (~line 356) | ✓ gatherProjectContext |
+| POST `/budget-health` | ✓ gpt-5-mini (~line 606) | ✓ gatherProjectContext |
+| POST `/optimize-schedule` | ✓ gpt-5-mini (~line 900) | - |
+| POST `/suggest-locations` | ✓ gpt-5-mini (~line 1010) | - |
+
+All can reuse existing `checkProjectAccessForUser` pattern; 4 must use `gatherProjectContext` which will also need the access check applied to it (currently has comment "access control is handled by the caller").
 
 **Also (cost, extends A3):** all 7 AI endpoints in `analysis.ts` (`analyze-script`, `generate-shots`, `optimize-budget`, `budget-scenarios`, `budget-health`, `optimize-schedule`, `suggest-locations`) run LLM completions with only `requireAuth` — no `checkAIGenerationLimit`, no `trackAIUsage`. Only `/fill-with-ai` (line 1034) is properly metered. Any free-plan user can burn unlimited Grok/OpenAI tokens. Minor extra: `suggest-locations` calls `locations.map(...)` on the unvalidated body (500 on bad input) — add a Zod schema while you're there.
 
