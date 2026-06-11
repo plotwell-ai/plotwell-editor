@@ -509,6 +509,15 @@ router.post('/import-from-script/:projectId', requireAuth, async (req, res) => {
       return res.status(401).json({ error: 'User not authenticated properly' });
     }
 
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot import scenes', role: access.role });
+    }
+
     // Parse script and extract scenes (uses prod_script_id by default)
     const { scenes, scriptTitle, scriptId } = await ScriptParsingService.parseScriptFromProject(
       projectId,
@@ -571,6 +580,15 @@ router.post('/import-to-storyboard/:projectId', requireAuth, async (req, res) =>
 
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated properly' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot import to storyboard', role: access.role });
     }
 
     // Parse script and extract scenes (uses prod_script_id by default)
@@ -1249,6 +1267,15 @@ router.post('/sync/:projectId', requireAuth, async (req, res) => {
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot sync production', role: access.role });
+    }
+
     // Perform sync (optionally for specific episode)
     const syncResult = await syncProductionWithScript(projectId, userId, episode_id as string | undefined);
 
@@ -1274,6 +1301,15 @@ router.post('/resolve-changes/:projectId', requireAuth, async (req, res) => {
 
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Verify project access with edit permission
+    const access = await checkProjectAccessForUser(projectId, userId);
+    if (!access.hasAccess) {
+      return res.status(403).json({ error: 'Access denied - not authorized for this project' });
+    }
+    if (!access.canEdit) {
+      return res.status(403).json({ error: 'Read-only access - viewers cannot resolve changes', role: access.role });
     }
 
     const { approvedScenes, rejectedScenes, deletedScenes, strategy } = req.body;
