@@ -113,7 +113,12 @@ export async function createCharacter(characterData: any) {
     story_arc,
     motivations,
     fears,
-    goals
+    goals,
+    age,
+    personality,
+    background,
+    appearance,
+    visual_profile
   } = characterData;
 
   return await supabase
@@ -129,7 +134,12 @@ export async function createCharacter(characterData: any) {
       story_arc,
       motivations,
       fears,
-      goals
+      goals,
+      age,
+      personality,
+      background,
+      appearance,
+      visual_profile
     }])
     .select()
     .single();

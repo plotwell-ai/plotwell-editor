@@ -106,6 +106,7 @@ For each location found across ALL sources, provide comprehensive analysis:
 - Narrative importance (how crucial this location is to the narrative)
 - Atmosphere/mood (tone and feeling of this location)
 - Visual characteristics (key visual elements, lighting, set design notes)
+- Visual profile (structure, surfaces, lighting, and distinctive_features; concrete visible facts only, never narrative importance)
 
 Return as a JSON array in this format:
 ${LOCATION_JSON_FORMAT}
@@ -164,6 +165,7 @@ For each location found, provide detailed analysis:
 - Narrative importance (critical/major/supporting/background) based on scene count and narrative impact
 - Atmosphere and mood (based on how it's described and used in the script)
 - Visual characteristics (lighting, set design, mood from script descriptions)
+- Visual profile (structure, surfaces, lighting, and distinctive_features; leave unknown values empty rather than inventing them)
 
 Return as a JSON array:
 ${LOCATION_JSON_FORMAT}
@@ -187,7 +189,9 @@ Return only valid JSON, no markdown or explanations.${params.languageInstruction
 interface LocationImageParams {
   locationName: string;
   locationType: string;
-  locationContext: string;
+  visualIdentity: string;
+  visualNotes: string;
+  atmosphere: string;
   imageStyle: string;
   includePeople: boolean;
   hasReference: boolean;
@@ -210,11 +214,11 @@ export function buildLocationImagePrompt(params: LocationImageParams): string {
 
   // Experiment: short prompt — anchor + people instruction + name/context only.
   if (SIMPLE_IMAGE_PROMPTS) {
-    return `${styleAnchor}. ${peopleInstruction} ${params.locationType || 'Location'}: ${params.locationName}. ${params.locationContext}. No text, no watermarks.`;
+    return `${params.visualIdentity} ${params.visualNotes} ${styleAnchor}. ${peopleInstruction} ${params.locationType || 'Location'}: ${params.locationName}. Mood and atmosphere: ${params.atmosphere || 'neutral'}. No text, no watermarks.`;
   }
 
   if (params.hasReference) {
-    return `A single location reference image. ${styleAnchor}. ${peopleInstruction} Professional ${params.locationType || 'location'} reference image. Location: ${params.locationName}. ${params.locationContext}. Reference similarity: ${params.similarityPercent || 70}%. Establishing composition for a reusable production location. Focus on architecture, terrain, lighting, atmosphere, and spatial layout. ${VISUAL_CONTINUITY_REQUIREMENTS}${styleEnforcement} No text, no labels, no watermarks.`;
+    return `${params.visualIdentity} ${params.visualNotes} A single location reference image of ${params.locationName}. ${styleAnchor}. ${peopleInstruction} Reference similarity: ${params.similarityPercent || 70}%. Establishing composition for a reusable production location. Mood and atmosphere: ${params.atmosphere || 'neutral'}. Atmosphere may change weather and emotional lighting only; it must not alter architecture, layout, materials, palette, or distinctive features. ${VISUAL_CONTINUITY_REQUIREMENTS}${styleEnforcement} No text, no labels, no watermarks.`;
   }
 
   const typeGuidance = params.locationType === 'interior'
@@ -223,5 +227,5 @@ export function buildLocationImagePrompt(params: LocationImageParams): string {
     ? 'Exterior view showing architectural features, terrain, atmospheric conditions.'
     : 'Establishing shot showing the location.';
 
-  return `A single location reference image. ${styleAnchor}. ${peopleInstruction} Professional ${params.locationType || 'location'} reference image of ${params.locationName}. ${params.locationContext}. ${typeGuidance} Establishing composition for a reusable production location. ${VISUAL_CONTINUITY_REQUIREMENTS}${styleEnforcement} No text, no labels, no watermarks.`;
+  return `${params.visualIdentity} ${params.visualNotes} A single location reference image of ${params.locationName}. ${styleAnchor}. ${peopleInstruction} ${typeGuidance} Establishing composition for a reusable production location. Mood and atmosphere: ${params.atmosphere || 'neutral'}. Atmosphere may change weather and emotional lighting only; it must not alter architecture, layout, materials, palette, or distinctive features. ${VISUAL_CONTINUITY_REQUIREMENTS}${styleEnforcement} No text, no labels, no watermarks.`;
 }

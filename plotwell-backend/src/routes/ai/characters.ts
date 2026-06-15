@@ -30,6 +30,10 @@ import {
   dedupeCharacterCandidates,
   getCharacterIdentityKey,
 } from '../../utils/characterIdentity';
+import {
+  buildCharacterVisualProfilePrompt,
+  sanitizeCharacterVisualProfile,
+} from '../../utils/visualProfiles';
 
 // Combined type for routes that need both pricing and AI tracking
 type CombinedRequest = PricingRequest & AITrackingRequest;
@@ -172,6 +176,7 @@ router.post("/generate-character-image", requireAuth, extractUserId, preventDupl
     character_id,
     character_name,
     appearance,              // Structured physical/visual description (preferred for images)
+    visual_profile,          // Stable structured visual identity
     description,             // Personality/role/story (non-visual)
     reference_image_url,     // Legacy: URL-based reference (deprecated)
     reference_image_base64,  // New: base64 data URI reference (preferred)
@@ -262,8 +267,10 @@ router.post("/generate-character-image", requireAuth, extractUserId, preventDupl
 
     // Extract age from description to anchor it explicitly in the prompt
     // Matches patterns like "25-year-old", "25 year old", "age 25", "aged 25", "25 years old", "25 años"
-    const ageMatch = characterDescription?.match(/(\d{1,2})[\s-]?(?:year[\s-]?old|years[\s-]?old|años|age(?:d)?[\s:]+)/i)
-      || characterDescription?.match(/(?:age(?:d)?|edad)[\s:]+(\d{1,2})/i);
+    const visualIdentityPart = buildCharacterVisualProfilePrompt(visual_profile);
+    const ageSource = `${visualIdentityPart} ${characterDescription}`;
+    const ageMatch = ageSource.match(/(\d{1,2})[\s-]?(?:year[\s-]?old|years[\s-]?old|años|age(?:d)?[\s:]+)/i)
+      || ageSource.match(/(?:age(?:d)?|edad)[\s:]+(\d{1,2})/i);
     const extractedAge = ageMatch ? parseInt(ageMatch[1] || ageMatch[0].match(/\d+/)?.[0] || '', 10) : null;
 
     // Build age anchor — placed at the very start of the prompt for maximum weight
@@ -300,6 +307,7 @@ router.post("/generate-character-image", requireAuth, extractUserId, preventDupl
     const similarityPercent = similarity !== undefined ? Math.round(parseFloat(similarity) * 100) : 70;
     prompt = buildCharacterImagePrompt({
       characterName: character_name,
+      visualIdentityPart,
       descriptionPart,
       elementPromptSection,
       imageStyle: effectiveVisualStyle,
@@ -842,6 +850,7 @@ router.post("/documents-to-characters", requireAuth, extractUserId, preventDupli
         project_id: projectId,
         name: canonicalizeCharacterName(character.name),
         appearance: character.appearance || null, // Concrete physical/visual description for image gen
+        visual_profile: sanitizeCharacterVisualProfile(character.visual_profile),
         description: character.description || "Character from comprehensive project analysis",
         character_type: sanitizeCharacterType(character.character_type), // Sanitize to valid DB values
         primary_role: character.primary_role || 'character',
@@ -1055,6 +1064,7 @@ router.post("/script-to-characters", requireAuth, extractUserId, preventDuplicat
         project_id: project_id,
         name: canonicalizeCharacterName(character.name),
         appearance: character.appearance || null, // Concrete physical/visual description for image gen
+        visual_profile: sanitizeCharacterVisualProfile(character.visual_profile),
         description: character.description || "Character from script analysis",
         character_type: sanitizeCharacterType(character.character_type), // Sanitize to valid DB values
         primary_role: character.primary_role || 'character',

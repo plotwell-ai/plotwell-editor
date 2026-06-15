@@ -149,6 +149,7 @@ INSTRUCTIONS:
 For each character found, provide detailed analysis:
 - Name (exact name from script, or role if unnamed)
 - Appearance (ONLY concrete physical/visual traits for an image: species i.e. human/animal/creature, age, build, skin/fur/hair color and style, eye color, distinctive marks, and wardrobe ONLY if the script explicitly describes it. NO personality, NO role, NO story. Empty string if the script gives no physical detail — do NOT invent looks.)
+- Visual profile (split visible evidence into body, face, styling, and distinctive_features; leave unknown parts empty and never infer looks from role or personality)
 - Description (personality, role in the story, behavior — NOT physical appearance)
 - Character type (main, minor, ensemble, background) based on screen time and story impact
 - Primary role (protagonist, antagonist, mentor, sidekick, love_interest, villain, hero, etc.)
@@ -164,6 +165,12 @@ Return as a JSON array:
   {
     "name": "Character Name",
     "appearance": "Concrete physical/visual traits only (species, age, build, coloring, distinctive features, wardrobe if stated). Empty string if none in the script.",
+    "visual_profile": {
+      "body": "Species, apparent age, height, build, posture, and body coloring from visible evidence only",
+      "face": "Face/head, hair/fur, eyes, complexion, and facial traits from visible evidence only",
+      "styling": "Explicit wardrobe, grooming, accessories, and recurring palette only",
+      "distinctive_features": "Scars, tattoos, markings, prosthetics, silhouette, or other visible identifiers"
+    },
     "description": "Personality, role, and behavior — NOT physical appearance",
     "character_type": "main|minor|ensemble|background",
     "primary_role": "protagonist|antagonist|mentor|sidekick|love_interest|villain|hero|anti_hero|deuteragonist|comic_relief|rival|character",
@@ -194,6 +201,7 @@ Return only valid JSON, no markdown or explanations.${params.languageInstruction
 
 interface CharacterImageParams {
   characterName: string;
+  visualIdentityPart: string;
   descriptionPart: string;
   elementPromptSection: string;
   imageStyle: string;
@@ -220,14 +228,14 @@ export function buildCharacterImagePrompt(params: CharacterImageParams): string 
   // Experiment: short prompt — anchor + subject + the (load-bearing) fidelity rules,
   // dropping reinforcement and the long negative list.
   if (SIMPLE_IMAGE_PROMPTS) {
-    return `${styleAnchor}. ${params.ageAnchor}Portrait of ${params.characterName}.${params.descriptionPart} ${SUBJECT_FIDELITY} ${WARDROBE_FIDELITY}${antiAnthro}${params.elementPromptSection}${params.imageContext} No text, no watermarks.`;
+    return `${params.visualIdentityPart} ${params.ageAnchor}${params.descriptionPart} ${styleAnchor}. Single-subject portrait of ${params.characterName}. ${SUBJECT_FIDELITY} ${WARDROBE_FIDELITY}${antiAnthro}${params.elementPromptSection}${params.imageContext} No text, no watermarks.`;
   }
 
   if (params.hasReference) {
-    return `A single-subject portrait. ${styleAnchor}. ${params.ageAnchor}Subject: ${params.characterName}.${params.descriptionPart} ${SUBJECT_FIDELITY} ${WARDROBE_FIDELITY}${antiAnthro}${params.elementPromptSection} Style intensity: ${params.similarityPercent || 70}%.${params.imageContext} Convey personality through expression and pose, not through invented costume.${enforcement} No collage, no grid, no split-screen, no multiple panels, no montage, no age progression. No text, no labels, no watermarks.`;
+    return `${params.visualIdentityPart} ${params.ageAnchor}${params.descriptionPart} A single-subject reference portrait of ${params.characterName}. ${styleAnchor}. ${SUBJECT_FIDELITY} ${WARDROBE_FIDELITY}${antiAnthro}${params.elementPromptSection} Reference similarity: ${params.similarityPercent || 70}%.${params.imageContext} Mood and personality may affect only expression, pose, and lighting; they must not change anatomy, face, hair, coloring, wardrobe, or distinctive features.${enforcement} No collage, no grid, no split-screen, no multiple panels, no montage, no age progression. No text, no labels, no watermarks.`;
   }
 
-  return `A single-subject portrait. ${styleAnchor}. ${params.ageAnchor}Portrait of ${params.characterName}.${params.descriptionPart} ${SUBJECT_FIDELITY} ${WARDROBE_FIDELITY}${antiAnthro}${params.elementPromptSection}${params.imageContext} Focus on the subject's defining physical features.${enforcement} No collage, no grid, no split-screen, no multiple panels, no montage, no age progression. No text, no labels, no watermarks.`;
+  return `${params.visualIdentityPart} ${params.ageAnchor}${params.descriptionPart} A single-subject reference portrait of ${params.characterName}. ${styleAnchor}. ${SUBJECT_FIDELITY} ${WARDROBE_FIDELITY}${antiAnthro}${params.elementPromptSection}${params.imageContext} Mood and personality may affect only expression, pose, and lighting; they must not change anatomy, face, hair, coloring, wardrobe, or distinctive features.${enforcement} No collage, no grid, no split-screen, no multiple panels, no montage, no age progression. No text, no labels, no watermarks.`;
 }
 
 // =============================================================================

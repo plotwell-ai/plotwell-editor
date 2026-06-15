@@ -257,6 +257,12 @@ export const CHARACTER_JSON_FORMAT = `[
   {
     "name": "Character Name or Role (e.g. 'Sarah', 'Police Officer', 'The Mother')",
     "appearance": "ONLY concrete physical/visual traits for an image: species (human/animal/creature), age, build, skin/fur/hair color and style, eye color, distinctive marks, and wardrobe ONLY if explicitly described in the source. No personality, no role, no story. Empty string if the source gives no physical detail.",
+    "visual_profile": {
+      "body": "Species, apparent age, height, build, posture, and body coloring explicitly supported by the source",
+      "face": "Face/head shape, hair/fur, eyes, complexion, and facial features explicitly supported by the source",
+      "styling": "Explicit wardrobe, grooming, accessories, and recurring visual palette only",
+      "distinctive_features": "Scars, tattoos, markings, prosthetics, silhouette, or other identity-defining visible traits"
+    },
     "description": "Personality, role in the story, and behavior. NOT physical appearance.",
     "character_type": "main",
     "primary_role": "protagonist",
@@ -277,6 +283,12 @@ export const LOCATION_JSON_FORMAT = `[
     "location_type": "interior|exterior|both",
     "story_importance": "critical|major|supporting|minor",
     "atmosphere": "Mood and feeling of this location",
-    "visual_notes": "Key visual elements, lighting, set design details"
+    "visual_notes": "Key visual elements, lighting, set design details",
+    "visual_profile": {
+      "structure": "Architecture, geography, scale, and spatial layout explicitly supported by the source",
+      "surfaces": "Materials, surfaces, furnishings, vegetation, and color palette explicitly supported by the source",
+      "lighting": "Physical light sources, window orientation, practical fixtures, and baseline lighting",
+      "distinctive_features": "Landmarks, recurring props, damage, signage, or identity-defining environmental features"
+    }
   }
 ]`;

@@ -6,6 +6,7 @@ import {
   canonicalizeCharacterName,
   getCharacterIdentityKey,
 } from "../utils/characterIdentity";
+import { sanitizeCharacterVisualProfile } from "../utils/visualProfiles";
 
 export async function getAll(req: Request, res: Response) {
   const { project_id, sort_by, sort_order, scope, episode_id, season_id } = req.query;
@@ -45,7 +46,12 @@ export async function create(req: Request, res: Response) {
     story_arc,
     motivations,
     fears,
-    goals
+    goals,
+    age,
+    personality,
+    background,
+    appearance,
+    visual_profile
   } = req.body;
   
   if (!name || !project_id) return res.status(400).json({ error: "Missing name or project_id" });
@@ -73,7 +79,12 @@ export async function create(req: Request, res: Response) {
     story_arc,
     motivations,
     fears,
-    goals
+    goals,
+    age,
+    personality,
+    background,
+    appearance,
+    visual_profile: sanitizeCharacterVisualProfile(visual_profile)
   };
   
   const { data, error } = await charactersService.createCharacter(characterData);
@@ -94,7 +105,12 @@ export async function update(req: Request, res: Response) {
     story_arc,
     motivations,
     fears,
-    goals
+    goals,
+    age,
+    personality,
+    background,
+    appearance,
+    visual_profile
   } = req.body;
   
   
@@ -148,7 +164,12 @@ export async function update(req: Request, res: Response) {
     story_arc,
     motivations,
     fears,
-    goals
+    goals,
+    age,
+    personality,
+    background,
+    appearance,
+    visual_profile: sanitizeCharacterVisualProfile(visual_profile)
   };
   
   // Include image_url even if it's null (to remove the image)

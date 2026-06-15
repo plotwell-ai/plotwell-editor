@@ -382,6 +382,7 @@ CREATE TABLE IF NOT EXISTS public.characters (
   personality TEXT,
   background TEXT,
   appearance TEXT,
+  visual_profile JSONB NOT NULL DEFAULT '{}'::jsonb,
   image_url TEXT,
   is_ai_generated BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -394,6 +395,7 @@ CREATE INDEX IF NOT EXISTS idx_characters_episode_id ON public.characters(episod
 COMMENT ON COLUMN public.characters.scope IS 'Scope of character: project (film), series (all episodes), season (one season), episode (guest star)';
 COMMENT ON COLUMN public.characters.season_id IS 'If scope=season, which season this character appears in';
 COMMENT ON COLUMN public.characters.episode_id IS 'If scope=episode, which episode this character appears in';
+COMMENT ON COLUMN public.characters.visual_profile IS 'Stable visual identity: body, face, styling, and distinctive_features';
 
 -- Character Images table (multiple images per character)
 CREATE TABLE IF NOT EXISTS public.character_images (
@@ -445,6 +447,7 @@ CREATE TABLE IF NOT EXISTS public.locations (
   -- Visual and atmospheric details (CRITICAL - required by frontend)
   atmosphere TEXT,
   visual_notes TEXT,
+  visual_profile JSONB NOT NULL DEFAULT '{}'::jsonb,
 
   -- Production location mapping (links story location to actual filming location)
   -- Foreign key constraint added later via ALTER TABLE (after production_locations table is created)
@@ -466,6 +469,7 @@ COMMENT ON COLUMN public.locations.scope IS 'Scope of location: project (film), 
 COMMENT ON COLUMN public.locations.season_id IS 'If scope=season, which season this location is used in';
 COMMENT ON COLUMN public.locations.episode_id IS 'If scope=episode, which episode this location is used in';
 COMMENT ON COLUMN public.locations.is_standing_set IS 'True if this is a permanent set used across multiple episodes';
+COMMENT ON COLUMN public.locations.visual_profile IS 'Stable visual identity: structure, surfaces, lighting, and distinctive_features';
 
 COMMENT ON COLUMN public.locations.production_location_id IS 'Links this story location to an actual production location (filming site) with cost, permits, and scheduling info';
 

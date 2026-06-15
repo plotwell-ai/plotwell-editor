@@ -41,44 +41,6 @@ const getPublicAICreditPacks = () =>
  * GET /api/ai-credits/balance
  * Get current AI credits balance
  */
-router.get('/balance', requireAuth, extractUserId, addPricingService, async (req: PricingRequest, res: Response) => {
-  try {
-    const userId = req.userId;
-    if (!userId) {
-      return res.status(401).json({ error: 'User not authenticated' });
-    }
-
-    const pricingService = req.pricingService || new PricingService(getSupabaseClient());
-    const balance = await pricingService.getAICreditsBalance(userId);
-
-    // Get subscription to check if user can purchase
-    const { isPaidSubscription } = require('../utils/subscriptionHelpers');
-    const subscription = await pricingService.getUserSubscription(userId);
-    const canPurchase = isPaidSubscription(subscription);
-
-    res.json({
-      balance,
-      can_purchase: canPurchase,
-      costs: AI_CREDITS_CONFIG.costs,
-      effective_costs: {
-        image: getEffectiveCost('image'),
-        video: getEffectiveCost('video'),
-        creative: getEffectiveCost('creative')
-      },
-      launch_discount: AI_CREDITS_CONFIG.launchDiscount,
-      pack: {
-        credits: AI_CREDITS_CONFIG.pack.credits,
-        price_dollars: AI_CREDITS_CONFIG.pack.priceDollars,
-        currency: AI_CREDITS_CONFIG.pack.currency
-      },
-      packs: getPublicAICreditPacks()
-    });
-  } catch (error) {
-    console.error('Error getting AI credits balance:', error);
-    res.status(500).json({ error: 'Failed to get AI credits balance' });
-  }
-});
-
 /**
  * POST /api/ai-credits/purchase
  * Create a Stripe checkout session for purchasing AI credits (one-time payment)

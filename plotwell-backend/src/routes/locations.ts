@@ -6,6 +6,7 @@ import { upload } from "../services/imageService";
 import { uploadLocationImage, deleteLocationImage } from "../services/locationImageService";
 import { resolveImageUrls, getSignedUrl, BUCKETS } from "../services/storageService";
 import { canonicalizeLocationName, getLocationIdentityKey } from "../utils/locationIdentity";
+import { sanitizeLocationVisualProfile } from "../utils/visualProfiles";
 
 const router = Router();
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
@@ -91,6 +92,7 @@ router.post("/", requireAuth, checkProjectAccess, checkProjectArchived, async (r
     story_importance,
     atmosphere,
     visual_notes,
+    visual_profile,
     production_location_id
   } = req.body;
   if (!name || !project_id) return res.status(400).json({ error: "Missing name or project_id" });
@@ -121,7 +123,8 @@ router.post("/", requireAuth, checkProjectAccess, checkProjectArchived, async (r
     location_type: location_type || 'interior',
     story_importance: story_importance || 'supporting',
     atmosphere,
-    visual_notes
+    visual_notes,
+    visual_profile: sanitizeLocationVisualProfile(visual_profile)
   };
 
   // Add production_location_id if provided
@@ -185,6 +188,7 @@ router.put("/:id", requireAuth, checkProjectAccessByRecordId("locations", true),
     story_importance,
     atmosphere,
     visual_notes,
+    visual_profile,
     production_location_id,
     image_url
   } = req.body;
@@ -232,6 +236,9 @@ router.put("/:id", requireAuth, checkProjectAccessByRecordId("locations", true),
   if (story_importance) updates.story_importance = story_importance;
   if (atmosphere !== undefined) updates.atmosphere = atmosphere;
   if (visual_notes !== undefined) updates.visual_notes = visual_notes;
+  if (visual_profile !== undefined) {
+    updates.visual_profile = sanitizeLocationVisualProfile(visual_profile);
+  }
 
   // Handle production_location_id - can be set to null to remove mapping
   if (production_location_id !== undefined) {

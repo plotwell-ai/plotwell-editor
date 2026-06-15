@@ -1,9 +1,12 @@
+import { mergeCharacterVisualProfiles } from './visualProfiles';
+
 const TECHNICAL_CUE_EXTENSION =
   /\s*\(\s*(?:V\.?\s*O\.?|O\.?\s*S\.?|O\.?\s*C\.?|CONT(?:INUE)?(?:D|['’]D)?\.?|MORE|SUPER|SUBTITLE|FILTER|PRE-?LAP)\s*\)\s*$/i;
 
 export interface CharacterCandidate {
   name?: unknown;
   appearance?: unknown;
+  visual_profile?: unknown;
   description?: unknown;
   character_type?: unknown;
   primary_role?: unknown;
@@ -108,6 +111,7 @@ export function dedupeCharacterCandidates<T extends CharacterCandidate>(candidat
     byKey.set(key, {
       ...existing,
       appearance: preferRicherText(existing.appearance, candidate.appearance),
+      visual_profile: mergeCharacterVisualProfiles(existing.visual_profile, candidate.visual_profile),
       description: preferRicherText(existing.description, candidate.description),
       character_type: mergeCharacterType(existing.character_type, candidate.character_type),
       primary_role: preferDefined(existing.primary_role, candidate.primary_role),

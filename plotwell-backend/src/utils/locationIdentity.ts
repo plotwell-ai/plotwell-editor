@@ -1,3 +1,5 @@
+import { mergeLocationVisualProfiles } from './visualProfiles';
+
 const TIME_OF_DAY_SUFFIX =
   'AL MISMO TIEMPO|MISMO TIEMPO|MOMENTOS? DESPU[ÉE]S|INSTANTES DESPU[ÉE]S|M[ÁA]S TARDE|MOMENTS? LATER|SAME TIME|MAGIC HOUR|DE D[ÍI]A|DE NOCHE|' +
   'DAY|NIGHT|DAWN|DUSK|MORNING|EVENING|AFTERNOON|NOON|MIDNIGHT|SUNRISE|SUNSET|CONTINUOUS|LATER|FLASHBACK|DREAM|FANTASY|' +
@@ -19,6 +21,7 @@ export interface LocationCandidate {
   story_importance?: unknown;
   atmosphere?: unknown;
   visual_notes?: unknown;
+  visual_profile?: unknown;
   [key: string]: unknown;
 }
 
@@ -194,6 +197,7 @@ export function dedupeLocationCandidates<T extends LocationCandidate>(candidates
       story_importance: mergeStoryImportance(existing.story_importance, candidate.story_importance),
       atmosphere: preferRicherText(existing.atmosphere, candidate.atmosphere),
       visual_notes: preferRicherText(existing.visual_notes, candidate.visual_notes),
+      visual_profile: mergeLocationVisualProfiles(existing.visual_profile, candidate.visual_profile),
     });
   }
 

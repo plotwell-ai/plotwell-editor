@@ -29,6 +29,10 @@ import {
   dedupeLocationCandidates,
   getLocationIdentityKey,
 } from '../../utils/locationIdentity';
+import {
+  buildLocationVisualProfilePrompt,
+  sanitizeLocationVisualProfile,
+} from '../../utils/visualProfiles';
 
 // Combined type for routes that need both pricing and AI tracking
 type CombinedRequest = PricingRequest & AITrackingRequest;
@@ -250,6 +254,7 @@ router.post("/documents-to-locations", requireAuth, extractUserId, preventDuplic
         story_importance: location.story_importance || 'supporting',
         atmosphere: location.atmosphere || null,
         visual_notes: location.visual_notes || null,
+        visual_profile: sanitizeLocationVisualProfile(location.visual_profile),
         is_ai_generated: true,
         scope: episode_id ? 'episode' : 'project',
         episode_id: episode_id || null
@@ -504,6 +509,7 @@ router.post("/script-to-locations", requireAuth, extractUserId, preventDuplicate
           story_importance: storyImportance,
           atmosphere: location.atmosphere || null,
           visual_notes: location.visual_notes || null,
+          visual_profile: sanitizeLocationVisualProfile(location.visual_profile),
           is_ai_generated: true,
           scope: episode_id ? 'episode' : 'project',
           episode_id: episode_id || null
@@ -592,7 +598,7 @@ router.post("/script-to-locations", requireAuth, extractUserId, preventDuplicate
 // Uses ImageModelRouter with OpenRouter primary and optional Replicate models.
 router.post("/generate-location-image", requireAuth, extractUserId, preventDuplicateLocationImageGeneration, addPricingService, checkAIGenerationLimit, checkImageCredits, trackImageUsage, addAIUsageTracker, extractProjectId, async (req: CombinedRequest, res) => {
   if (DEBUG_AI) console.log("🏠 Location image generation started");
-  const { location_id, location_name, description, visual_notes, atmosphere, location_type, reference_image_url, reference_image_base64, image_style, similarity, preferred_model, include_people, custom_instructions } = req.body;
+  const { location_id, location_name, description, visual_notes, visual_profile, atmosphere, location_type, reference_image_url, reference_image_base64, image_style, similarity, preferred_model, include_people, custom_instructions } = req.body;
 
   // Support both base64 (preferred) and URL-based references
   const referenceImage = reference_image_base64 || reference_image_url;
@@ -606,10 +612,12 @@ router.post("/generate-location-image", requireAuth, extractUserId, preventDupli
     const { getImageRouter, sanitizeForImageGeneration } = await import('../../services/imageModelRouter');
     type ImageModelId = import('../../services/imageModelRouter').ImageModelId;
 
-    // Build prompt for location reference image
-    // Build raw context from visual_notes and atmosphere (skip description - it's narrative)
+    // Stable location identity leads the prompt. Mood is deliberately last.
+    const visualIdentity = buildLocationVisualProfilePrompt(visual_profile);
+    const sanitizedVisualNotes = visual_notes
+      ? await sanitizeForImageGeneration(visual_notes)
+      : '';
     const atmosphereHint = atmosphere ? atmosphere.split(/[,.]/).filter(Boolean)[0]?.trim() : '';
-    const locationContext = [visual_notes, atmosphereHint].filter(Boolean).join(". ");
 
     // Render look from the project (source of truth); image_style is an optional override.
     const effectiveVisualStyle = await resolveEffectiveVisualStyle(supabase, req.body.project_id || req.projectId, image_style);
@@ -617,7 +625,11 @@ router.post("/generate-location-image", requireAuth, extractUserId, preventDupli
     let prompt: string = buildLocationImagePrompt({
       locationName: location_name,
       locationType: location_type,
-      locationContext,
+      visualIdentity,
+      visualNotes: sanitizedVisualNotes
+        ? `Additional visible environment details: ${sanitizedVisualNotes}.`
+        : '',
+      atmosphere: atmosphereHint,
       imageStyle: effectiveVisualStyle,
       includePeople: !!include_people,
       hasReference: !!referenceImage,
