@@ -4,7 +4,7 @@ import { requireSyncedScenes } from '../../middleware/productionPrerequisitesMid
 import { attachProductionStatus } from '../../middleware/productionPrerequisitesMiddleware';
 import { ProductionAnalysisService } from '../../services/productionAnalysisService';
 import { ScriptParsingService } from '../../services/scriptParsingService';
-import { syncProductionWithScript, lockScene, unlockScene, getSyncStatus, resolveChanges } from '../../services/productionSyncServiceSimple';
+import { syncProductionWithScript, lockScene, getSyncStatus } from '../../services/productionSyncServiceSimple';
 import { generateSceneId } from '../../services/sceneIdentityService';
 import { getUserId, checkProjectAccessForUser, supabase } from './helpers';
 const DEBUG_AI = process.env.DEBUG_AI === 'true';
