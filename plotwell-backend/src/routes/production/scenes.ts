@@ -1213,11 +1213,6 @@ router.post('/scenes/:sceneId/lock', requireAuth, async (req, res) => {
   }
 });
 
-      details: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
 /**
  * GET /api/production/scenes/:projectId
  * Get production scenes with current script data merged

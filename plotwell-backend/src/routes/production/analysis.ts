@@ -57,11 +57,6 @@ router.post('/optimize-budget', requireAuth, async (req, res) => {
       }
     }
 
-    const userId = getUserId(req);
-    if (!userId) {
-      return res.status(401).json({ error: 'User not authenticated' });
-    }
-
     // Gather comprehensive project context
     const context = await gatherProjectContext(projectId, userId);
     const { project, cast, crew, budgetItems, locations, sceneCards: dbSceneCards, metrics, sceneDescriptions } = context;

@@ -162,17 +162,6 @@ router.post('/check-limit', requireAuth, extractUserId, async (req: PricingReque
 });
 
 /**
- * Preview upgrade costs and credits
- */
-      addon_adjustments: addonAdjustments
-    });
-  } catch (error) {
-    console.error('Error upgrading subscription:', error);
-    res.status(500).json({ error: 'Failed to upgrade subscription' });
-  }
-});
-
-/**
  * Cancel user subscription
  */
 router.post('/cancel', requireAuth, extractUserId, async (req: PricingRequest, res) => {
