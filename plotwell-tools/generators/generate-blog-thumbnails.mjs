@@ -47,6 +47,11 @@ const POSTS = [
     filename: 'how-to-write-a-logline.png',
     prompt: `A cinematic close-up of a single typed sentence on aged cream paper — a logline — resting on a dark wooden writer's desk, a vintage typewriter partially visible in the background, warm amber lamplight, dramatic side lighting with deep shadows, shallow depth of field, professional screenwriting aesthetic, no readable text on the paper, 16:9 format, editorial photography style`,
   },
+  {
+    slug: 'visual-storytelling-techniques',
+    filename: 'visual-storytelling-techniques.png',
+    prompt: `An overhead cinematic shot of a professional film production workspace with storyboard panels arranged on a light table, various camera angles and shot types sketched on cards, a director's monitor displaying a film scene in muted tones, warm studio lighting from above, shallow depth of field, professional cinema aesthetic, organized creative space, warm neutral tones with subtle amber accents, no readable text, 16:9 format, editorial photography style`,
+  },
 ];
 
 async function generate(post) {
