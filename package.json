@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "description": "Open source screenplay editor built on ProseMirror. Powered by plotwell.co",
   "author": "PLOTWELL S.L.U. <hello@plotwell.co> (https://plotwell.co)",
-  "homepage": "https://editor.plotwell.co",
+  "homepage": "https://plotwell.co",
   "repository": {
     "type": "git",
     "url": "https://github.com/plotwell-ai/plotwell-editor.git"
